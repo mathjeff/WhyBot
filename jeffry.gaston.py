@@ -41,22 +41,65 @@ class StringUtils(object):
     return
 
   def toGetterText(self, owner, getterName):
-    objectName = str(owner)
+    return self.toVariableText(str(owner)) + "." + str(getterName)
+
+  def toVariableText(self, objectName):
     if " " in objectName:
       objectName = "(" + objectName + ")"
-    return objectName + "." + str(getterName)
+    return objectName
 
 stringUtils = StringUtils()
 
 
 
+#############################################################################################################################################################################################
+#for determining where in this file (jeffry.gaston.py) we are
+
+programLineStart = None
+
+class ExternalStackInfo(object):
+  def __init__(self):
+    self.ignoredLineNumbers = []
+
+  def setup(self):
+    #make a note of the current stack to enable ignoring any lines currently active (which just participate in this custom interpreter and aren't part of the program being defined)
+    lineNumbers = self.extract_lineNumbers()
+    self.ignoredLineNumbers = lineNumbers
+    
+  def getCurrentLineNumber(self):
+    ignoredLineNumber = None
+    #Return the number of the line of source code in this file that defines the line currently being added to the Program
+    #Only relevant if statements are being added to the Program
+    for entry in self.extractStack():
+      candidate = self.extract_lineNumber(entry)
+      if candidate not in self.ignoredLineNumbers:
+        #logger.message("Got line number of " + str(entry) + " and ignored " + str(ignoredLineNumber))
+        return candidate
+      else:
+        ignoredLineNumber = candidate
+    raise Exception("Failed to identify line number")
+
+  def extractStack(self):
+    return traceback.extract_stack()
+
+  def extract_lineNumbers(self):
+    stack = self.extractStack()
+    lineNumbers = [self.extract_lineNumber(line) for line in stack]
+    return lineNumbers
+
+  def extract_lineNumber(self, entry):
+    return entry[1]
+
+externalStackInfo = ExternalStackInfo()
 
 #############################################################################################################################################################################################
 #program statements
 
+
 #a program
 class Program(object):
   def __init__(self):
+    externalStackInfo.setup()
     self.statements = []
     self.nativeClasses = [
       NativeClassDefinition("List", (lambda: ListWrapper()), [
@@ -69,9 +112,10 @@ class Program(object):
       ])
     ]
     
+    
   def put(self, statements):
     self.statements = self.statements + statements
-
+    
   def run(self):
     execution = Execution(self)
     return execution.run()
@@ -151,7 +195,7 @@ class Scope(object):
       errorJustification = AndJustification("Gave " + str(numArgumentsProvided) + " arguments : " + str(justifiedValues) + "; required " + str(numArgumentsRequired) + " arguments: " + str(f.argumentNames), [callJustification] + valueJustifications)
       logger.fail("Invalid number of arguments to function " + str(f), errorJustification)
     child = self.execution.newScope()
-    child.description = f.functionName
+    child.description = "function " + f.functionName
     #rename a bunch of variables
     for i in range(len(justifiedValues)):
       info = justifiedValues[i]
@@ -198,23 +242,21 @@ class Scope(object):
     parentClassName = classDefinition.parentClassName
     newObject = self.newChild()
     #newObject.description = objectDescription
-    newObject.description = className + "#" + str(newObject.objectId)
+    newObject.description = className + "@" + str(newObject.objectId)
 
 
     #put empty values onto the object
-    #for fieldName in classDefinition.fieldTypes.keys(): #unfortunately the data types aren't validated yet, but they come in handy for readibility for now
     self.makeEmptyFields(classDefinition, newObject)
     implScope = classDefinition.implementedInScope
-    for itemName in implScope.data.keys():
-      item = implScope.data[itemName]
-      newObject.declareInfo(itemName, JustifiedValue(item.value, TextJustification("This value is defined in the class definition")))
+    #for itemName in implScope.data.keys():
+    #  item = implScope.data[itemName]
+    #  newObject.declareInfo(itemName, JustifiedValue(item.value, TextJustification("This value is defined in the class definition")))
     newObject.declareInfo("__class__", JustifiedValue(classDefinition, TextJustification("This is the class of the object")))
     #copy all the methods onto the object
     initInfo = classDefinition.implementedInScope.tryGetInfo("__init__")
     if initInfo is not None:
       #after having used the scope of the class to find the function, now use the execution scope to actually call that function
       executionScope = self
-      #executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, justification)      
       executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, justification)      
     return JustifiedValue(newObject, justification) #TODO should this justification include mention of the fact that the code said to construct the class this way?
 
@@ -241,7 +283,9 @@ class Object(Scope):
     return JustifiedValue(str(self), UnknownJustification())
 
   def callMethodName(self, methodName, justifiedValues, callJustification):
-    return self.callFunctionName(methodName, [JustifiedValue(self, UnknownJustification())] + justifiedValues, callJustification)
+    classDefinition = self.getInfo("__class__").value
+    classDefinitionImplScope = classDefinition.implementedInScope
+    return classDefinitionImplScope.callFunctionName(methodName, [JustifiedValue(self, UnknownJustification())] + justifiedValues, callJustification)
 
 #stores runtime information relating to running a program
 class Execution(object):
@@ -291,6 +335,7 @@ class Execution(object):
       self.declareNativeClass(nativeClassDefinition)
 
   def declareNativeClass(self, nativeClassDefinition):
+    externalStackInfo.setup()
     foundInScope = self.getScope()
     managedClassName = nativeClassDefinition.managedClassName
     implementedInScope = self.rootScope.newChild(managedClassName)
@@ -327,7 +372,7 @@ class Execution(object):
     classDefinition.implementedInScope = implementedInScope
 
     #get the scope in which the class can be found
-    foundInScope = self.getScope()
+    foundInScope = self.rootScope
     foundInScope.declareInfo(classDefinition.className, JustifiedValue(classDefinition, justification))
 
     #make any method definitions
@@ -340,9 +385,13 @@ class LogicStatement(object):
   def __init__(self):
     self.execution = None
     self.children = []
+    self.definitionScope = None
+    self.lineNumber = externalStackInfo.getCurrentLineNumber()
+    #logger.message("initialized " + repr(self))
 
   def beOwned(self, execution):
     self.execution = execution
+    self.definitionScope = execution.getScope()
 
   def getChildren(self):
     return self.children
@@ -377,15 +426,16 @@ class If(LogicStatement):
   def updateChild(self, child):
     self.children.append(child)
 
-  def process(self, justification):
-    result = self.condition.process(justification)
+  def process(self, callJustification):
+    result = self.condition.process(callJustification)
     description = str(self) + " was evaluated as " + str(result.value)
+    childJustification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
     if result.value == True:
       for trueEffect in self.trueEffects:
-        trueEffect.process(AndJustification(description, [justification, result.justification]))
+        trueEffect.process(childJustification)
     else:
       for falseEffect in self.falseEffects:
-        falseEffect.process(AndJustification(description, [justification, result.justification]))
+        falseEffect.process(childJustification)
 
   def __str__(self):
     return str(self.condition)
@@ -411,7 +461,8 @@ class ForEach(LogicStatement):
     #print(valueInfos.justification.explainRecursive())
     for valueInfo in values:
       value = valueInfo.value
-      justification = AndJustification("loop iterator " + str(self.variableName) + " equals " + str(value), [callJustification, valuesJustification, valueInfo.justification])
+      justification = FullJustification(str(self.variableName), value, self.lineNumber, callJustification, [valuesJustification, valueInfo.justification])
+
       loopScope.setInfo(self.variableName, JustifiedValue(value, justification))
 
       iterationScope = self.execution.getScope().newChild("iteration where " + str(self.variableName) + " = " + str(value))
@@ -435,9 +486,10 @@ class Set(LogicStatement):
     self.propertyName = propertyName
     self.valueProvider = valueProvider
 
-  def process(self, justification):
-    info = self.valueProvider.process(justification)
-    self.execution.getScope().setInfo(self.propertyName, JustifiedValue(info.value, AndJustification(str(self.propertyName) + "=" + str(info.value), [justification, info.justification])))
+  def process(self, callJustification):
+    info = self.valueProvider.process(callJustification)
+    justification = FullJustification(self.propertyName, info.value, self.lineNumber, callJustification, [info.justification])
+    self.execution.getScope().setInfo(self.propertyName, JustifiedValue(info.value, justification))
 
   def getChildren(self):
     return [self.valueProvider]
@@ -455,7 +507,7 @@ class Var(Set):
       self.execution.getScope().declareInfo(self.propertyName, JustifiedValue(None, TextJustification("the default variable value is None")))
       super(Var, self).process(callJustification)
     except Exception as e:
-      logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification]))
+      logger.fail(traceback.format_exc(e), FullJustification("error", e, self.lineNumber, callJustification, []))
 
 class Return(Var):
   def __init__(self, valueProvider):
@@ -483,15 +535,15 @@ class Func(LogicStatement):
     self.children += statements
 
   def process(self, justification):
-    self.execution.getScope().declareFunction(FunctionDefinition(self.functionName,self.argumentNames, self.statements), justification)
+    self.execution.getScope().declareFunction(FunctionDefinition(self.functionName, self.argumentNames, self.statements), justification)
 
   def __str__(self):
     return "def " + str(self.functionName)
 
 #a member function definition
-class MFunc(Func):
-  def __init__(self, functionName, argumentNames=[]):
-    super(MFunc, self).__init__(functionName, ["self"] + argumentNames)
+#class MFunc(Func):
+#  def __init__(self, functionName, argumentNames=[]):
+#    super(MFunc, self).__init__(functionName, ["self"] + argumentNames)
 
 #invokes a function
 class Call(LogicStatement):
@@ -501,14 +553,13 @@ class Call(LogicStatement):
     self.valueProviders = valueProviders
     self.children += valueProviders
 
-  def process(self, justification):
-    infos = [provider.process(justification) for provider in self.valueProviders]
+  def process(self, callJustification):
+    infos = [provider.process(callJustification) for provider in self.valueProviders]
     justifications = [info.justification for info in infos]
     if self.execution is None:
       raise Exception("execution is None for " + str(self))
-    justifications = [justification] + justifications
     text = "Call " + str(self.functionName) + "(" + ", ".join([str(info.value) for info in infos]) + ")"
-    return self.execution.getScope().callFunctionName(self.functionName, infos, AndJustification(text, justifications))
+    return self.execution.getScope().callFunctionName(self.functionName, infos, AndJustification(text, [callJustification]))
 
   def __str__(self):
     return "call " + str(self.functionName) + "(" + ", ".join([str(provider) for provider in self.valueProviders]) + ")"
@@ -528,6 +579,7 @@ class Justification(object):
     self.justificationId = justificationId
     justificationId += 1
     justificationsById.append(self)
+    self.interesting = True
 
   def addSupporter(self, supporter):
     if not isinstance(supporter, Justification):
@@ -549,20 +601,45 @@ class Justification(object):
 
   def explainRecursive(self, maxDepth=-1):
     description = self.describeWithId()
-    if len(self.supporters) > 0:
-      description += " because"
-    indent = "| "
+    newlineDash = "\n|-"
+    newlineIndent = "\n| "
     if maxDepth == 0:
       if len(self.supporters) != 0:
-        description += "\n" + indent + "(more)\n"
+        description += " because"
+        description += newlineDash + " (more)"
     else:
-      for reason in self.supporters:
-        for line in reason.explainRecursive(maxDepth - 1).split("\n"):
-          description += "\n" + indent + line
+      interestingChildren = self.getInterestingChildren()
+      #if len(self.supporters) == 1:
+      #  #description = "(skipping " + description + ")\n" anything with only one justification is considered too simple to be worth explaining
+      #  description = self.supporters[0].explainRecursive(maxDepth)
+      #  return description
+      description += " because"
+      for reasonIndex in range(len(interestingChildren)):
+        reason = interestingChildren[reasonIndex]
+        if reasonIndex > 0:
+          description += newlineIndent
+        lines = reason.explainRecursive(maxDepth - 1).split("\n")
+        for lineIndex in range(len(lines)):
+          line = lines[lineIndex]
+          if lineIndex == 0:
+            description += newlineDash + line
+          else:
+            description += newlineIndent + line
     return description
 
+  def getInterestingChildren(self):
+    results = []
+    for child in self.supporters:
+      if child.interesting:
+        results.append(child)
+      else:
+        for descendent in child.getInterestingChildren():
+          if descendent not in results:
+            results.append(descendent)
+    return results
+
   def describeWithId(self):
-    return "(" + str(self.justificationId) + ") " + self.describe()
+    return "- (#" + str(self.justificationId) + ") " + self.describe()
 
   def explainOneLevel(self):
     description = self.describeWithId()
@@ -596,7 +673,7 @@ class AndJustification(Justification):
     for justification in justifications:
       self.addSupporter(justification)
     if "__main__" in description:
-      logger.fail("Invalid description: " + description, self)
+      logger.fail("Invalid description passed to AndJustification: " + description, self)
 
   def describe(self):
     return str(self.description)
@@ -613,6 +690,61 @@ class EqualJustification(Justification):
 
   def describe(self):
     return self.itemDescription + ' equals "' + str(self.itemValue) + '"'
+
+class FullJustification(Justification):
+  def __init__(self, variableName, value, logicLocation, callJustification, valueJustifications):
+    super(FullJustification, self).__init__()
+    self.variableName = variableName
+    self.value = value
+    self.callJustification = callJustification
+    self.logicLocation = logicLocation
+    self.valueJustifications = valueJustifications
+    if not isinstance(valueJustifications, list):
+      logger.fail("Invalid (non-list) value provided for argument 'justifications' to FullJustification.__init__", callJustification)
+    for supporter in [callJustification] + valueJustifications:
+      self.addSupporter(supporter)
+    if self.logicLocation is None:
+      logger.fail("Empy logicLocation for FullJustification", callJustification)
+    self.interesting = True
+
+  def describe(self):
+    message = ""
+    #if self.logicLocation is not None:
+    message += "[line " + str(self.logicLocation) + "]: "
+    message += stringUtils.toVariableText(self.variableName) + " = " + str(self.value)
+    return message
+
+  def explainRecursive(self, maxDepth=-1):
+    description = self.describeWithId()
+    newlineDash = "\n|-"
+    newlineIndent = "\n| "
+    if maxDepth == 0:
+      if len(self.supporters) != 0:
+        description += " because"
+        description += newlineDash + " (more)"
+    else:
+      interestingChildren = self.getInterestingChildren()
+      #if len(self.supporters) == 1:
+      #  #description = "(skipping " + description + ")\n" anything with only one justification is considered too simple to be worth explaining
+      #  description = self.supporters[0].explainRecursive(maxDepth)
+      #  return description
+      description += " because"
+      for reasonIndex in range(len(interestingChildren)):
+        if reasonIndex > 0:
+          description += newlineIndent
+        reason = interestingChildren[reasonIndex]
+        description += newlineDash
+        if reason == self.callJustification:
+          description += "Called because"
+        else:
+          description += "True because"      
+        lines = reason.explainRecursive(maxDepth - 1).split("\n")
+        for lineIndex in range(len(lines)):
+          line = lines[lineIndex]
+          description += newlineIndent + line
+    return description
+
+
 
 #contains a value and a justification
 class JustifiedValue(object):
@@ -637,9 +769,11 @@ class JustifiedValue(object):
 class ValueProvider(object):
   def __init__(self):
     self.execution = None
-
+    self.lineNumber = externalStackInfo.getCurrentLineNumber()
+    
   def beOwned(self, execution):
     self.execution = execution
+    self.definitionScope = execution.getScope()
 
   def process(self, justification):
     raise Exception("Invoked abstract method 'process' of ValueProvider")
@@ -668,14 +802,18 @@ class Get(ValueProvider):
   def process(self, callJustification):
     if self.execution is None:
       logger.fail("execution is None for " + str(self), callJustification)
+    scope = self.execution.getScope()
     try:
-      info = self.execution.getScope().getInfo(self.propertyName)
+      info = scope.getInfo(self.propertyName)
     except Exception as e:
       logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification]))
     if not isinstance(info, JustifiedValue):
       raise Exception("Invalid value stored for variable " + str(self.propertyName) + "; required JustifiedValue, got " + str(info))
-    callJustification = info.justification
-    return JustifiedValue(info.value, callJustification)
+    storeJustification = info.justification
+
+    justification = FullJustification(str(self.propertyName), info.value, self.lineNumber, callJustification, [storeJustification])
+    return JustifiedValue(info.value, justification)
+    #return JustifiedValue(info.value, AndJustification(str(self.propertyName) + " = " + str(info.value) + " (in " + str(scope) + ")", [callJustification, storeJustification]))
 
   def __str__(self):
     return "get " + str(self.propertyName)
@@ -729,7 +867,10 @@ class Ask(ValueProvider):
 
   def process(self, justification):
     prompt = self.promptProvider.process(justification).value
-    result = raw_input(prompt)
+    try:
+      result = raw_input(prompt)
+    except EOFError as e:
+      sys.exit(0)
     message = "You entered '" + str(result) + "'"
     if prompt is not None:
       message += " when asked '" + str(prompt) + "'"
@@ -744,13 +885,14 @@ class Ask(ValueProvider):
 #tells whether two things are equal
 class Eq(ValueProvider):
   def __init__(self, provider1, provider2):
+    super(Eq, self).__init__()
     self.provider1 = provider1
     self.provider2 = provider2
       
 
-  def process(self, justification):
-    info1 = self.provider1.process(justification)
-    info2 = self.provider2.process(justification)
+  def process(self, callJustification):
+    info1 = self.provider1.process(callJustification)
+    info2 = self.provider2.process(callJustification)
     matches = (info1.value == info2.value)
     description = str(self.provider1)
     if matches:
@@ -758,7 +900,10 @@ class Eq(ValueProvider):
     else:
       description += "!="
     description += str(self.provider2)
-    return JustifiedValue(matches, AndJustification(description, [EqualJustification('value 1', info1.value, info1.justification), EqualJustification('value 2', info2.value, info2.justification)]))
+    #return JustifiedValue(matches, AndJustification(description, [EqualJustification('value 1', info1.value, info1.justification), EqualJustification('value 2', info2.value, info2.justification)]))
+    justification1 = FullJustification(str(self.provider1), info1.value, self.lineNumber, callJustification, [info1.justification])
+    justification2 = FullJustification(str(self.provider2), info1.value, self.lineNumber, callJustification, [info2.justification])
+    return JustifiedValue(matches, AndJustification(description, [justification1, justification2]))
 
   def getChildren(self):
     return [self.provider1, self.provider2]
@@ -774,16 +919,21 @@ class Plus(ValueProvider):
     super(Plus, self).__init__()
     self.valueProviders = valueProviders
 
-  def process(self, justification):
-    infos = [provider.process(justification) for provider in self.valueProviders]
+  def process(self, callJustification):
+    infos = [provider.process(callJustification) for provider in self.valueProviders]
     sum = infos[0].value
     for otherInfo in infos[1:]:
       sum += otherInfo.value
-    justifications = [justification] + [info.justification for info in infos]
-    return JustifiedValue(sum, AndJustification("sum equals " + str(sum), justifications))
+    justifications = [info.justification for info in infos]
+    #return JustifiedValue(sum, AndJustification(self.getVariableName() + " equals " + str(sum) + " (in " + str(self.definitionScope) + ")", justifications))
+    justification = FullJustification(self.getVariableName(), sum, self.lineNumber, callJustification, justifications)
+    return JustifiedValue(sum, justification)
 
   def getChildren(self):
     return self.valueProviders
+
+  def getVariableName(self):
+    return "sum"
 
   def __str__(self):
     return "+".join([str(provider) for provider in self.valueProviders])
@@ -792,6 +942,9 @@ class Plus(ValueProvider):
 class Concat(Plus):
   def __init__(self, valueProviders):
     super(Concat, self).__init__(valueProviders)
+
+  def getVariableName(self):
+    return "concatenation"
 
 #some math
 
@@ -937,12 +1090,14 @@ class DotSet(LogicStatement):
     self.valueProvider = valueProvider
     self.children += [ownerProvider, valueProvider]
 
-  def process(self, justification):
-    ownerInfo = self.ownerProvider.process(justification)
+  def process(self, callJustification):
+    ownerInfo = self.ownerProvider.process(callJustification)
     owner = ownerInfo.value
-    valueInfo = self.valueProvider.process(justification)
+    valueInfo = self.valueProvider.process(callJustification)
     value = valueInfo.value
-    owner.setInfo(self.propertyName, JustifiedValue(value, AndJustification(stringUtils.toGetterText(owner, self.propertyName) + "=" + str(value), [justification, valueInfo.justification])))
+    #owner.setInfo(self.propertyName, JustifiedValue(value, AndJustification(stringUtils.toGetterText(owner, self.propertyName) + "=" + str(value), [justification, valueInfo.justification])))
+    justification = FullJustification(stringUtils.toGetterText(owner, self.propertyName), value, self.lineNumber, callJustification, [valueInfo.justification])
+    owner.setInfo(self.propertyName, JustifiedValue(value, justification))
 
 #sets a property of self
 class SelfSet(DotSet):
@@ -957,14 +1112,16 @@ class DotGet(ValueProvider):
     self.propertyName = propertyName
     self.children = [self.ownerProvider]
 
-  def process(self, justification):
-    ownerInfo = self.ownerProvider.process(justification)
+  def process(self, callJustification):
+    ownerInfo = self.ownerProvider.process(callJustification)
     owner = ownerInfo.value
     if owner is None:
       logger.fail("object to dereference is None", ownerInfo.justification)
     valueInfo = owner.getInfo(self.propertyName)
     description = stringUtils.toGetterText(owner, self.propertyName)
-    return JustifiedValue(valueInfo.value, AndJustification(description, [ownerInfo.justification, valueInfo.justification]))
+    justification = FullJustification(description, valueInfo.value, self.lineNumber, callJustification, [ownerInfo.justification, valueInfo.justification])
+    #return JustifiedValue(valueInfo.value, AndJustification(description, [ownerInfo.justification, valueInfo.justification]))
+    return JustifiedValue(valueInfo.value, justification)
 
   def getChildren(self):
     return self.children
@@ -978,43 +1135,29 @@ class SelfGet(DotGet):
     super(SelfGet, self).__init__(Get("self"), propertyName)
 
 
-#returns the class scope of the current class
-class ClassScope(ValueProvider):
+#returns the scope in which the current class is defined (so almost the ClassDefinition)
+class DefinedInClass_Scope(ValueProvider):
   def __init__(self):
-    super(ClassScope, self).__init__()
-    self.scope = None
+    super(DefinedInClass_Scope, self).__init__()
 
-  def beOwned(self, execution):
-    super(ClassScope, self).beOwned(execution)
-    self.scope = self.execution.getScope()
-    
   def process(self, justification):
-    return JustifiedValue(self.scope, UnknownJustification())
+    return JustifiedValue(self.definitionScope, UnknownJustification())
 
   def __str__(self):
-    return str(self.scope)
+    return str(self.definitionScope)
 
-#returns the parent class scope of the current class
-class SuperScope(ClassScope):
+#returns the parent of the scope in which the current class is defined (so almost the parent's ClassDefinition)
+class SuperScope(DefinedInClass_Scope):
   def process(self, justification):
-    return JustifiedValue(self.scope.parent, TextJustification("parent scope of " + str(self.scope) + " is " + str(self.scope.parent)))
+    return JustifiedValue(self.definitionScope.parent, TextJustification("parent scope of " + str(self.definitionScope) + " is " + str(self.definitionScope.parent)))
 
   def __str__(self):
-    return str(self.scope) + ".super"
+    return str(self.definitionScope) + ".super"
 
-#returns the scope inside the current object
-class CompileScope(ValueProvider):
-  def process(self, justification):
-    objectInfo = self.execution.getScope().getInfo("self")
-    return JustifiedValue(objectInfo.value, objectInfo.justification)
-
-  def __str__(self):
-    return "scope of self"
-
-#returns the current runtime scope
-class ObjectScope(ValueProvider):
+#returns the class scope for a given object
+class ClassFromObject_Scope(ValueProvider):
   def __init__(self, objectProvider):
-    super(ObjectScope, self).__init__()
+    super(ClassFromObject_Scope, self).__init__()
     self.objectProvider = objectProvider
 
   def process(self, callJustification):
@@ -1027,11 +1170,21 @@ class ObjectScope(ValueProvider):
       logger.fail(str(self) + " failed", justification)
     classDefinition = classInfo.value
     classScope = classDefinition.implementedInScope
-    #objectInfo = self.execution.getScope()
     return JustifiedValue(classScope, TextJustification("(" + str(objectValue) + ") instanceof " + str(classDefinition)))
+
+  def getChildren(self):
+    return [self.objectProvider]
 
   def __str__(self):
     return "main scope"
+
+#returns the class scope inside the current object (which may be a subclass of the class doing the asking)
+class SelfScope(ClassFromObject_Scope):
+  def __init__(self):
+    super(SelfScope, self).__init__(Get("self"))
+
+  def __str__(self):
+    return "scope of self"
 
 #calls a particular method on a particular object
 class DotCallImpl(LogicStatement):
@@ -1046,7 +1199,7 @@ class DotCallImpl(LogicStatement):
     self.children += argumentProviders
 
   def process(self, callJustification):
-    classScope_info = self.classScope_provider.process(AndJustification("Calling " + str(self), [callJustification]))
+    classScope_info = self.classScope_provider.process(AndJustification("[" + str(self.lineNumber) + "]: Calling " + str(self), [callJustification]))
     classScope = classScope_info.value
     classScope_Justification = EqualJustification("self", classScope, classScope_info.justification)
     argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
@@ -1054,10 +1207,15 @@ class DotCallImpl(LogicStatement):
     selfJustification = argumentInfos[0].justification
     numNonSelfParameters = len(argumentInfos) - 1
     text = "Evaluated " + str(self)
-    argumentJustification = AndJustification(text, argumentJustifications)
-    overallJustification = AndJustification(text, [callJustification, selfJustification, argumentJustification])
-    f = classScope.getFunction(self.methodName, overallJustification)
-    return self.execution.getScope().callFunction(f, argumentInfos, overallJustification)
+    #argumentJustification = AndJustification(text, argumentJustifications)
+    #overallJustification = AndJustification(text, [callJustification, selfJustification, argumentJustification])
+    #overallJustification = FullJustification(str(self), "result", self.lineNumber, callJustification, [selfJustification, argumentJustification])
+    contextJustification = AndJustification("[line " + str(self.lineNumber) + "]: " + text, [callJustification, selfJustification] + argumentJustifications)
+    f = classScope.getFunction(self.methodName, contextJustification)
+    #result = self.execution.getScope().callFunction(f, argumentInfos, overallJustification)
+    result = self.execution.getScope().callFunction(f, argumentInfos, contextJustification)
+    justification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
+    return JustifiedValue(result.value, justification)
 
   def __str__(self):
     #return "(" + str(self.classScope_provider) + "): (" + str(self.argumentProviders[0]) + ")." + str(self.methodName) + "(" + ", ".join([str(provider) for provider in self.argumentProviders[1:]]) + ")"
@@ -1071,11 +1229,11 @@ class SuperCall(DotCallImpl):
 #calls a particular method on the current object
 class SelfCall(DotCallImpl):
   def __init__(self, methodName, argumentProviders=[]):
-    super(SelfCall, self).__init__(CompileScope(), methodName, [Get("self")] + argumentProviders)
+    super(SelfCall, self).__init__(SelfScope(), methodName, [Get("self")] + argumentProviders)
 
 class DotCall(DotCallImpl):
   def __init__(self, objectProvider, methodName, argumentProviders=[]):
-    super(DotCall, self).__init__(ObjectScope(objectProvider), methodName, [objectProvider] + argumentProviders)
+    super(DotCall, self).__init__(ClassFromObject_Scope(objectProvider), methodName, [objectProvider] + argumentProviders)
 
 #for calling python methods directly
 class NativeSelfCall(LogicStatement):
@@ -1093,14 +1251,16 @@ class NativeSelfCall(LogicStatement):
     selfJustification = managedObject_info.justification
     nativeObject = managedObject.nativeObject
     argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
-    argsText = "args = (" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
-    argumentsJustification = AndJustification(argsText, [info.justification for info in argumentInfos])
+    argsText = "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
+    #argumentsJustification = AndJustification(argsText, [info.justification for info in argumentInfos])
+    argumentsJustification = FullJustification("arguments", argsText, self.lineNumber, callJustification, [info.justification for info in argumentInfos])
     allJustifications = [callJustification] + [info.justification for info in argumentInfos]
     try:
       nativeMethod = getattr(nativeObject, self.methodName)
     except Exception as e:
       logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification, argumentsJustification]))
-    historyJustification = AndJustification("Called " + str(nativeObject) + "." + self.methodName, [callJustification, selfJustification])
+    historyJustification = AndJustification("Called (unmanaged) " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", [callJustification, selfJustification] + [argumentsJustification])
+    #historyJustification.interesting = False
     args = [historyJustification] + [info for info in argumentInfos]
     count = len(args)
     if count == 0:
@@ -1116,18 +1276,20 @@ class NativeSelfCall(LogicStatement):
     elif count == 5:
       result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4])
     elif count == 6:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[5])
+      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5])
     elif count == 7:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[5], arg[6])
+      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6])
     elif count == 8:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[5], arg[7])
+      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7])
     elif count == 9:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[5], arg[8])
+      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8])
     else:
       #TODO there must be a better way to do this
       logger.fail("Too many arguments", AndJustifications(str(count) + " arguments", allJustifications))
-    info = JustifiedValue(result.value, AndJustification(str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ") = " + str(result), [result.justification]))
-    self.execution.getScope().declareInfo("return", info)
+    #info = JustifiedValue(result.value, AndJustification(str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ") = " + str(result), [result.justification]))
+    justification = FullJustification("unmanaged " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
+    #justification.interesting = False
+    self.execution.getScope().declareInfo("return", JustifiedValue(result.value, justification))
     return result
 
 #for constructing
@@ -1164,35 +1326,54 @@ class NativeMethodDefinition(object):
   def __init__(self, methodName, argumentNames=[]):
     self.methodName = methodName
     self.argumentNames = argumentNames
+    
 
-class ListWrapper(list):
+class ListWrapper(object):
   def __init__(self):
     super(ListWrapper, self).__init__()
     self.justifications = []
+    self.impl = []
 
   def append(self, callJustification, item):
-    super(ListWrapper, self).append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self), [callJustification, item.justification])))
+    if not isinstance(item, JustifiedValue):
+      logger.fail("Invalid item " + str(item) + " (not a subclass of JustifiedValue) appended to " + str(self), callJustification)
+    #if not hasattr(item.value, "callMethodName"):
+    #  logger.fail("Invalid item " + str(item) + " (not managed object) appended to " + str(self), callJustification)
+    self.impl.append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])))
     #self.justifications.append(JustifiedValue(item, callJustification))
     return JustifiedValue(None, callJustification)
 
   def getItems(self, callJustification):
     #return self
-    return JustifiedValue(self, callJustification)
+    return JustifiedValue(self.impl, AndJustification("Contents of " + str(self) + " = " + str([info.value for info in self.impl]), [callJustification] + [info.justification for info in self.impl]))
     #return JustifiedValue(self, AndJustification("List contents", [callJustification] + self.justifications))
 
   def toString(self, callJustification):
-    tostringInfos = [item.value.callMethodName("toString", [], callJustification) for item in self]
-    result =  "[" + ", ".join([item.value for item in tostringInfos]) + "]"
-    justificationText  =  "Evaluated List.toString() = [" + ", ".join([item.value for item in tostringInfos]) + "]"
+    tostringInfos = []
+    texts = []
     allJustifications = []
-    for i in range(len(tostringInfos)):
-      allJustifications.append(tostringInfos[i].justification)
-      allJustifications.append(self[i].justification)
-    elementsJustification = AndJustification("Contents of " + str(self) + " = " + str(result), [justification for justification in allJustifications])
+    for info in self.impl:
+      value = info.value
+      allJustifications.append(info.justification)
+      if hasattr(value, "callMethodName"):
+        elementInfo = value.callMethodName("toString", [], callJustification)
+        tostringInfos.append(elementInfo)
+        texts.append(elementInfo.value)
+        allJustifications.append(info.justification)
+      else:
+        #TODO should we make a StringWrapper class instead of type-checking here?
+        #calling toString of a native class is too simple to be worth explaining so we just skip explaining it (and below we explain how the element was put into the list to begin with)
+        texts.append(str(value))
+        
+    result =  "[" + ", ".join([text for text in texts]) + "]"
+    justificationText  =  "Returned List.toString() = " + result
+    elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
+    #elementsJustification = FullJustification("toString", result, None, callJustification, allJustifications)
+    return JustifiedValue(result, elementsJustification)
+    #return JustifiedValue(result, AndJustification(justificationText, [callJustification, elementsJustification]))
 
-    #justifications = [callJustification] + [info.justification for info in infos]
-
-    return JustifiedValue(result, AndJustification(justificationText, [callJustification, elementsJustification]))
+  def __str__(self):
+    return str(self.impl)
 
 class DictionaryWrapper(object):
   def __init__(self):
@@ -1500,7 +1681,13 @@ def suggestion():
         DotCall(SelfGet("solutions"), "append", [Get("solution")]), #just for testing
       ])
       .func("trySolve", ["problem", "universe"], [
-        Return(SelfCall("getDoableSolutions", [Get("problem"), Get("universe")]))
+        Var("solutions", SelfCall("getDoableSolutions", [Get("problem"), Get("universe")])),
+        Var("messages", New("List")),
+        ForEach("solution", DotCall(Get("solutions"), "getItems"), [
+          DotCall(Get("messages"), "append", [Concat([DotCall(Get("solution"), "toString"), Const("\n")])])
+        ]),
+        #Return(SelfCall("getDoableSolutions", [Get("problem"), Get("universe")]))
+        Return(Get("messages"))
       ])
       .func("getRelevantDirectSolutions", ["problem"], [
         Var("relevantSolutions", New("List")),
@@ -1734,39 +1921,38 @@ def treeProgram():
 def inheritanceTest():
   program = Program()
   program.put([
-    Class("TestGrandParent", None, {}, [
-      MFunc("__init__").when([
+    Class("TestGrandParent")
+      .init([], [
         Print(Const("running init in TestGrandParent class"))
-      ]),
-      MFunc("talk").when([
+      ])
+      .func("talk", [], [
         Print(Const("running talk in TestGrandParent class")),
       ]),
-    ]),
-    Class("TestParent", "TestGrandParent", {}, [
-      MFunc("__init__").when([
+    Class("TestParent")
+      .inherit("TestGrandParent")
+      .init([], [
         Print(Const("running init in TestParent class")),
         SuperCall("__init__"),
         SelfCall("talk")
-      ]),
-      MFunc("talk").when([
+      ])
+      .func("talk", [], [
         Print(Const("running talk in TestParent class")),
         SuperCall("talk"),
       ]),
-    ]),
-    Class("TestChild", "TestParent", {}, [
-      MFunc("__init__").when([
+    Class("TestChild")
+      .inherit("TestParent")
+      .init([], [
         Print(Const("running init in TestChild class")),
         SuperCall("__init__"),
-        #DotCallImpl(Get("self"), "talk")
-      ]),
-      MFunc("talk").when([
+      ])
+      .func("talk", [], [
         Print(Const("running talk in TestChild class")),
         SuperCall("talk"),
       ]),
-    ]),
 
     Var("testChild", New("TestChild")),
   ])
+  program.run()
   return program
 
 def argTest():
@@ -1798,6 +1984,7 @@ def main():
   #printModified()
   #equalityCheck()
   suggestion()
+  #inheritanceTest()
 
 main()
 #abbdf4f9d3a6cbd25076cd554f102355 *-
