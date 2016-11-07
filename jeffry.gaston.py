@@ -131,7 +131,7 @@ class Scope(object):
     if not isinstance(info, JustifiedValue):
       raise Exception("Invalid value stored for variable " + str(key) + "; required JustifiedValue, got " + str(info))
     if key in self.data:
-      raise Exception("Variable '" + key + "' already defined")
+      raise Exception("Variable '" + key + "' already defined in " + str(self))
     self.data[key] = info
 
   def findScope(self, key):
@@ -313,7 +313,7 @@ class Execution(object):
     statement.beOwned(self)
     for child in statement.getChildren():
       if not hasattr(child, "beOwned"):
-        raise Exception("Invalid child statement " + str(child) + " (invalid class) assigned to parent statement " + str(statement))
+        raise Exception("Invalid child statement " + str(child) + " (invalid class (does not implement beOwned)) assigned to parent statement " + str(statement))
       self.ownStatement(child)
 
   def getScope(self):
@@ -477,6 +477,37 @@ class ForEach(LogicStatement):
 
   def __str__(self):
     return "for " + str(self.variableName) + " in " + str(self.valuesProvider)
+
+#a 'while'
+class While(LogicStatement):
+  def __init__(self, condition, statements):
+    super(While, self).__init__()
+    if not hasattr(condition, "process"):
+      logger.fail("Invalid condition " + str(condition) + " does not have a 'process' method")
+    self.condition = condition
+    self.statements = statements
+    self.children.append(condition)
+    self.children += statements
+    self.statements = statements
+
+  def process(self, callJustification):
+    while True:
+      loopScope = self.execution.getScope().newChild("while (" + str(self.condition) + ")")
+      self.execution.addScope(loopScope)
+
+      conditionInfo = self.condition.process(callJustification)
+      if not conditionInfo.value:
+        break
+
+      justification = FullJustification(str(self.condition), conditionInfo.value, self.lineNumber, callJustification, [conditionInfo.justification])
+
+      for statement in self.statements:
+        statement.process(justification)
+
+      self.execution.removeScope()
+
+  def __str__(self):
+    return "while (" + str(self.condition) + ")"
 
 
 #a Set could be something like 'x = 5'
@@ -824,13 +855,14 @@ class Int(ValueProvider):
     super(Int, self).__init__()
     self.inputProvider = inputProvider
 
-  def process(self, justification):
-    inputInfo = self.inputProvider.process(justification)
+  def process(self, callJustification):
+    inputInfo = self.inputProvider.process(callJustification)
     try:
       outputValue = int(inputInfo.value)
     except ValueError as e:
       outputValue = None
-    return JustifiedValue(outputValue, inputInfo.justification)
+    justification = FullJustification("int(" + str(inputInfo.value) + ")", outputValue, self.lineNumber, callJustification, [inputInfo.justification])
+    return JustifiedValue(outputValue, justification)
 
   def getChildren(self):
     return [self.inputProvider]
@@ -1287,7 +1319,8 @@ class NativeSelfCall(LogicStatement):
       #TODO there must be a better way to do this
       logger.fail("Too many arguments", AndJustifications(str(count) + " arguments", allJustifications))
     #info = JustifiedValue(result.value, AndJustification(str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ") = " + str(result), [result.justification]))
-    justification = FullJustification("unmanaged " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
+    #justification = FullJustification("unmanaged " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
+    justification = FullJustification("unmanaged " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
     #justification.interesting = False
     self.execution.getScope().declareInfo("return", JustifiedValue(result.value, justification))
     return result
@@ -1337,17 +1370,12 @@ class ListWrapper(object):
   def append(self, callJustification, item):
     if not isinstance(item, JustifiedValue):
       logger.fail("Invalid item " + str(item) + " (not a subclass of JustifiedValue) appended to " + str(self), callJustification)
-    #if not hasattr(item.value, "callMethodName"):
-    #  logger.fail("Invalid item " + str(item) + " (not managed object) appended to " + str(self), callJustification)
     self.impl.append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])))
-    #self.justifications.append(JustifiedValue(item, callJustification))
     return JustifiedValue(None, callJustification)
 
   def getItems(self, callJustification):
-    #return self
     return JustifiedValue(self.impl, AndJustification("Contents of " + str(self) + " = " + str([info.value for info in self.impl]), [callJustification] + [info.justification for info in self.impl]))
-    #return JustifiedValue(self, AndJustification("List contents", [callJustification] + self.justifications))
-
+    
   def toString(self, callJustification):
     tostringInfos = []
     texts = []
@@ -1368,10 +1396,8 @@ class ListWrapper(object):
     result =  "[" + ", ".join([text for text in texts]) + "]"
     justificationText  =  "Returned List.toString() = " + result
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
-    #elementsJustification = FullJustification("toString", result, None, callJustification, allJustifications)
     return JustifiedValue(result, elementsJustification)
-    #return JustifiedValue(result, AndJustification(justificationText, [callJustification, elementsJustification]))
-
+    
   def __str__(self):
     return str(self.impl)
 
@@ -1845,9 +1871,10 @@ def suggestion():
       ])
       .func("communicate", [], [
         Print(Const("")),
-        Var("response", Ask(Const("Say something!"))),
-        DotCall(Get("self"), "talkOnce", [Get("response")]),
-        DotCall(Get("self"), "communicate", []),
+        While(Const(True), [
+          Var("response", Ask(Const("Say something!"))),
+          DotCall(Get("self"), "talkOnce", [Get("response")]),
+        ]),
       ]),
 
     Var("communicator", New("Communicator")),
