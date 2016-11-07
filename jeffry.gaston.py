@@ -73,7 +73,6 @@ class ExternalStackInfo(object):
     for entry in self.extractStack():
       candidate = self.extract_lineNumber(entry)
       if candidate not in self.ignoredLineNumbers:
-        #logger.message("Got line number of " + str(entry) + " and ignored " + str(ignoredLineNumber))
         return candidate
       else:
         ignoredLineNumber = candidate
@@ -102,14 +101,29 @@ class Program(object):
     externalStackInfo.setup()
     self.statements = []
     self.nativeClasses = [
-      NativeClassDefinition("List", (lambda: ListWrapper()), [
+      NativeClassDefinition("String", (lambda why, text: StringWrapper(why, text)), [
+        NativeMethodDefinition("__init__", ["text"]),
+        NativeMethodDefinition("split", ["separator"]),
+        NativeMethodDefinition("toString", []),
+        NativeMethodDefinition("plus", ["other"]),
+        NativeMethodDefinition("equals", ["other"]),
+      ]),
+      NativeClassDefinition("List", (lambda why: ListWrapper(why)), [
         NativeMethodDefinition("append", ["item"]),
-        NativeMethodDefinition("getItems", []),
+        #NativeMethodDefinition("getItems", []),
         NativeMethodDefinition("toString", []),
       ]),
-      NativeClassDefinition("Dict", (lambda: DictionaryWrapper()), [
+      NativeClassDefinition("Dict", (lambda why: DictionaryWrapper(why)), [
         NativeMethodDefinition("get", ["key"]),
-      ])
+      ]),
+      NativeClassDefinition("Bool", (lambda why, value: BoolWrapper(why, value)), [
+        NativeMethodDefinition("toString", []),
+        NativeMethodDefinition("equals", ["other"]),
+      ]),
+      NativeClassDefinition("Num", (lambda why, value: NumberWrapper(why, value)), [
+        NativeMethodDefinition("toString", []),
+        NativeMethodDefinition("nonEmpty", []),
+      ]),
     ]
     
     
@@ -208,13 +222,20 @@ class Scope(object):
     self.execution.removeScope()
     result = child.tryGetInfo("return") #not sure yet whether using a variable named 'return' is a hack or a feature but it's weird
     if result is not None:
+      functionText = str(f) + "(" + ", ".join([str(info.value) for info in justifiedValues]) + ")"
+      if not isinstance(result, JustifiedValue):
+        logger.fail("Invalid value " + repr(result.__class__) + " (not JustifiedValue) returned from " + functionText, result.justification)
+      value = result.value
+      if value is not None:
+        if not isinstance(value, Object):
+          logger.fail("Invalid value " + repr(value.__class__) + " (not Object) returned from " + functionText, result.justification)
       return result
     else:
       scope = child.tryFindScope("return")
       if scope is None:
-        return JustifiedValue(result, TextJustification(str(f.functionName) + " did not reach any return statement"))
+        return JustifiedValue(None, TextJustification(str(f.functionName) + " did not reach any return statement"))
       else:
-        return JustifiedValue(result, TextJustification(str(f.functionName) + " explicitly returned None"))
+        return JustifiedValue(None, TextJustification(str(f.functionName) + " explicitly returned None"))
 
 
 
@@ -232,7 +253,7 @@ class Scope(object):
       newObject.declareInfo(fieldName, JustifiedValue(None, TextJustification("The default value for a member variable is None")))
     
     
-  def newObject(self, className, justifiedArguments, justification):
+  def newObject(self, className, justifiedArguments, callJustification):
     classInfo = self.tryGetInfo(className)
     if classInfo is None:
       logger.fail("Class " + str(className) + " is not defined", justification)
@@ -252,13 +273,23 @@ class Scope(object):
     #  item = implScope.data[itemName]
     #  newObject.declareInfo(itemName, JustifiedValue(item.value, TextJustification("This value is defined in the class definition")))
     newObject.declareInfo("__class__", JustifiedValue(classDefinition, TextJustification("This is the class of the object")))
-    #copy all the methods onto the object
+    if isinstance(classDefinition, NativeClassDefinition):
+      #it would be nice move the 'newObject.nativeObject = constructor()' into a parent method, but we can't even call that parent method until newObject.nativeObject has been set
+      constructor = classDefinition.constructor
+      argumentInfos = [UnknownJustification()] + justifiedArguments
+      newObject.nativeObject = functionUtils.unwrapAndCall(constructor, argumentInfos)
+      #print("saving managedObject = " + str(newObject) + " on " + str(newObject.nativeObject))
+      newObject.nativeObject.setManagedObject(newObject)
+    #else:
+    #  print("no managed object to save for " + str(newObject))
     initInfo = classDefinition.implementedInScope.tryGetInfo("__init__")
+
     if initInfo is not None:
       #after having used the scope of the class to find the function, now use the execution scope to actually call that function
       executionScope = self
-      executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, justification)      
-    return JustifiedValue(newObject, justification) #TODO should this justification include mention of the fact that the code said to construct the class this way?
+      executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, callJustification)
+    justification = AndJustification("New " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
+    return JustifiedValue(newObject, justification)
 
 
   def __str__(self):
@@ -279,8 +310,8 @@ class Object(Scope):
   def __str__(self):
     return self.description
 
-  def toString(self, callJustification):
-    return JustifiedValue(str(self), UnknownJustification())
+  #def toString(self, callJustification):
+  #  return JustifiedValue(str(self), UnknownJustification())
 
   def callMethodName(self, methodName, justifiedValues, callJustification):
     classDefinition = self.getInfo("__class__").value
@@ -338,8 +369,19 @@ class Execution(object):
     externalStackInfo.setup()
     foundInScope = self.getScope()
     managedClassName = nativeClassDefinition.managedClassName
-    implementedInScope = self.rootScope.newChild(managedClassName)
+
+
+    parentClassName = nativeClassDefinition.parentClassName
+    if parentClassName is not None:
+      parentClass = self.getScope().getInfo(parentClassName).value
+      parentImplementationScope = parentClass.implementedInScope
+    else:
+      parentClass = None
+      parentImplementationScope = self.rootScope
+    
+    implementedInScope = parentImplementationScope.newChild(nativeClassDefinition.managedClassName)
     nativeClassDefinition.implementedInScope = implementedInScope
+
     foundInScope.declareInfo(managedClassName, JustifiedValue(nativeClassDefinition, TextJustification(str(managedClassName) + " is a built-in class")))
     for methodDefinition in nativeClassDefinition.methodDefinitions:
       nativeStatement = NativeSelfCall(methodDefinition.methodName, [Get(argumentName) for argumentName in methodDefinition.argumentNames])
@@ -352,10 +394,6 @@ class Execution(object):
         TextJustification(str(methodDefinition.methodName) + " is a built-in method")
       )
       self.ownStatement(nativeStatement)
-
-    nativeStatement = NativeConstructor()
-    implementedInScope.declareFunction(FunctionDefinition("__init__", ["self"], [nativeStatement]), TextJustification(str(methodDefinition.methodName) + " is a built-in method"))
-    self.ownStatement(nativeStatement)
 
 
   def declareClass(self, classDefinition, justification):
@@ -387,8 +425,7 @@ class LogicStatement(object):
     self.children = []
     self.definitionScope = None
     self.lineNumber = externalStackInfo.getCurrentLineNumber()
-    #logger.message("initialized " + repr(self))
-
+    
   def beOwned(self, execution):
     self.execution = execution
     self.definitionScope = execution.getScope()
@@ -430,7 +467,7 @@ class If(LogicStatement):
     result = self.condition.process(callJustification)
     description = str(self) + " was evaluated as " + str(result.value)
     childJustification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
-    if result.value == True:
+    if result.value.nativeObject.isTrue():
       for trueEffect in self.trueEffects:
         trueEffect.process(childJustification)
     else:
@@ -457,9 +494,7 @@ class ForEach(LogicStatement):
     valuesJustification = valueInfos.justification
     loopScope.declareInfo(self.variableName, JustifiedValue(None, TextJustification("Initialized by ForEach loop")))
     values = valueInfos.value
-    #print("looping over " + str(values))
-    #print(valueInfos.justification.explainRecursive())
-    for valueInfo in values:
+    for valueInfo in values.nativeObject.impl:
       value = valueInfo.value
       justification = FullJustification(str(self.variableName), value, self.lineNumber, callJustification, [valuesJustification, valueInfo.justification])
 
@@ -615,6 +650,8 @@ class Justification(object):
   def addSupporter(self, supporter):
     if not isinstance(supporter, Justification):
       logger.fail("Invalid justification " + str(supporter) + " (not a subclass of Justification) given as support for " + str(self))
+    if supporter.justificationId > self.justificationId:
+      logger.fail("Added a supporter (" + str(supporter) + ") with higher id to the supportee (" + str(self) + ")")
     self.supporters.append(supporter)
 
   def getSupporters(self):
@@ -784,7 +821,7 @@ class JustifiedValue(object):
       logger.fail("JustifiedValue (" + str(value) + ") was given as the value of a JustifiedValue, which is unnecessary redundancy")
     self.value = value
     if not isinstance(justification, Justification):
-      logger.fail("Invalid justification " + str(justification) + " (not a subclass of Justification) given for " + str(value))
+      logger.fail("Invalid justification " + repr(justification) + " (not a subclass of Justification) given for " + str(value), justification)
     self.justification = justification
 
   def __str__(self):
@@ -858,18 +895,18 @@ class Int(ValueProvider):
   def process(self, callJustification):
     inputInfo = self.inputProvider.process(callJustification)
     try:
-      outputValue = int(inputInfo.value)
+      outputValue = int(inputInfo.value.nativeObject.getText())
     except ValueError as e:
       outputValue = None
-    justification = FullJustification("int(" + str(inputInfo.value) + ")", outputValue, self.lineNumber, callJustification, [inputInfo.justification])
-    return JustifiedValue(outputValue, justification)
+    return self.execution.getScope().newObject("Num", [JustifiedValue(outputValue, UnknownJustification())], callJustification)
+    #justification = FullJustification("int(" + str(inputInfo.value) + ")", outputObject, self.lineNumber, callJustification, [inputInfo.justification])
+    #return JustifiedValue(outputObject, justification)
 
   def getChildren(self):
     return [self.inputProvider]
 
   def __str__(self):
     return "int(" + str(self.inputProvider) + ")"
-
 
 #gets a justification
 class JustificationGetter(ValueProvider):
@@ -881,7 +918,7 @@ class JustificationGetter(ValueProvider):
     idInfo  = self.idProvider.process(callJustification)
     value = idInfo.value
     if value is not None:
-      justification = justificationsById[value]
+      justification = justificationsById[value.nativeObject.getNumber()]
       return JustifiedValue(justification, justification)
     else:
       return JustifiedValue(None, callJustification)
@@ -897,16 +934,17 @@ class Ask(ValueProvider):
   def __init__(self, promptProvider=None):
     self.promptProvider = promptProvider
 
-  def process(self, justification):
-    prompt = self.promptProvider.process(justification).value
+  def process(self, callJustification):
+    prompt = self.promptProvider.process(callJustification).value.nativeObject.getText()
     try:
-      result = raw_input(prompt)
+      enteredText = raw_input(prompt)
     except EOFError as e:
       sys.exit(0)
-    message = "You entered '" + str(result) + "'"
+    message = "You entered '" + str(enteredText) + "'"
     if prompt is not None:
       message += " when asked '" + str(prompt) + "'"
-    return JustifiedValue(result, TextJustification(message))
+    return self.execution.getScope().newObject("String", [JustifiedValue(enteredText, UnknownJustification())], TextJustification(message))
+    #return JustifiedValue(result, TextJustification(message))
 
   def getChildren(self):
     result = []
@@ -925,7 +963,15 @@ class Eq(ValueProvider):
   def process(self, callJustification):
     info1 = self.provider1.process(callJustification)
     info2 = self.provider2.process(callJustification)
-    matches = (info1.value == info2.value)
+    if info1.value is not None:
+      value1 = info1.value.nativeObject
+    else:
+      value1 = None
+    if info2.value is not None:
+      value2 = info2.value.nativeObject
+    else:
+      value2 = None
+    matches = (value1 == value2)
     description = str(self.provider1)
     if matches:
       description += "="
@@ -935,7 +981,9 @@ class Eq(ValueProvider):
     #return JustifiedValue(matches, AndJustification(description, [EqualJustification('value 1', info1.value, info1.justification), EqualJustification('value 2', info2.value, info2.justification)]))
     justification1 = FullJustification(str(self.provider1), info1.value, self.lineNumber, callJustification, [info1.justification])
     justification2 = FullJustification(str(self.provider2), info1.value, self.lineNumber, callJustification, [info2.justification])
-    return JustifiedValue(matches, AndJustification(description, [justification1, justification2]))
+    justification = AndJustification(description, [justification1, justification2])
+    justifiedValue = JustifiedValue(matches, justification)
+    return self.execution.getScope().newObject("Bool", [justifiedValue], callJustification)
 
   def getChildren(self):
     return [self.provider1, self.provider2]
@@ -953,13 +1001,22 @@ class Plus(ValueProvider):
 
   def process(self, callJustification):
     infos = [provider.process(callJustification) for provider in self.valueProviders]
-    sum = infos[0].value
+    info0 = infos[0]
+    sum = info0
+    if not isinstance(sum.value, Object):
+      logger.fail("Invalid data type for " + str(sum) + " (not object)", info0.justification)
     for otherInfo in infos[1:]:
-      sum += otherInfo.value
+      value = otherInfo.value
+      if not isinstance(value, Object):
+        logger.fail("Invalid data type for " + str(value) + " (not object)", otherInfo.justification)
+      sum = sum.value.callMethodName("plus", [otherInfo], callJustification)
+      if not isinstance(sum.value, Object):
+        logger.fail("Invalid return data type for " + str(sum) + " (not object)", sum.justification)
+
     justifications = [info.justification for info in infos]
     #return JustifiedValue(sum, AndJustification(self.getVariableName() + " equals " + str(sum) + " (in " + str(self.definitionScope) + ")", justifications))
     justification = FullJustification(self.getVariableName(), sum, self.lineNumber, callJustification, justifications)
-    return JustifiedValue(sum, justification)
+    return JustifiedValue(sum.value, justification)
 
   def getChildren(self):
     return self.valueProviders
@@ -987,7 +1044,7 @@ class Print(LogicStatement):
     super(Print, self).__init__()
     self.messageProvider = messageProvider
     if self.messageProvider is None:
-      self.messageProvider = Const("")
+      self.messageProvider = Str("")
     self.children.append(self.messageProvider)
 
   def process(self, justification):
@@ -1002,7 +1059,7 @@ class Print(LogicStatement):
     #it only gets invoked when other lines of code directly invoke it
 
     info = self.messageProvider.process(justification)
-    logger.message(info.value)
+    logger.message(info.value.nativeObject.getText())
     return info
 
   def __str__(self):
@@ -1113,6 +1170,14 @@ class New(ValueProvider):
   def __str__(self):
     return "new " + str(self.className) + "(" + ", ".join([str(item) for item in self.argumentProviders]) + ")"
     
+class Str(New):
+  def __init__(self, text):
+    super(Str, self).__init__("String", [Const(text)])
+
+class Bool(New):
+  def __init__(self, value):
+    super(Bool, self).__init__("Bool", [Const(value)])
+
 #sets a property of an object - nearly the same as Set
 class DotSet(LogicStatement):
   def __init__(self, ownerProvider, propertyName, valueProvider):
@@ -1267,6 +1332,36 @@ class DotCall(DotCallImpl):
   def __init__(self, objectProvider, methodName, argumentProviders=[]):
     super(DotCall, self).__init__(ClassFromObject_Scope(objectProvider), methodName, [objectProvider] + argumentProviders)
 
+class FunctionUtils(object):
+  def unwrapAndCall(self, method, args):
+    count = len(args)
+    if count == 0:
+      result = method()
+    elif count == 1:
+      result = method(args[0])
+    elif count == 2:
+      result = method(args[0], args[1])
+    elif count == 3:
+      result = method(args[0], args[1], args[2])
+    elif count == 4:
+      result = method(args[0], args[1], args[2], arg[3])
+    elif count == 5:
+      result = method(args[0], args[1], args[2], arg[3], arg[4])
+    elif count == 6:
+      result = method(args[0], args[1], args[2], arg[3], arg[4], arg[5])
+    elif count == 7:
+      result = method(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6])
+    elif count == 8:
+      result = method(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7])
+    elif count == 9:
+      result = method(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8])
+    else:
+      #TODO there must be a better way to do this
+      logger.fail("Too many arguments: " + str(args))
+    return result
+functionUtils = FunctionUtils()
+
+
 #for calling python methods directly
 class NativeSelfCall(LogicStatement):
   def __init__(self, methodName, argumentProviders=[]):
@@ -1286,38 +1381,20 @@ class NativeSelfCall(LogicStatement):
     argsText = "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
     #argumentsJustification = AndJustification(argsText, [info.justification for info in argumentInfos])
     argumentsJustification = FullJustification("arguments", argsText, self.lineNumber, callJustification, [info.justification for info in argumentInfos])
+    #for info in argumentInfos:
+    #  if not isinstance(info.value, Object):
+    #    logger.fail("Invalid object " + str(info.value) + " (not an Object) passed to " + str(managedObject) + "." + str(self.methodName), info.justification)
     allJustifications = [callJustification] + [info.justification for info in argumentInfos]
     try:
       nativeMethod = getattr(nativeObject, self.methodName)
     except Exception as e:
       logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification, argumentsJustification]))
-    historyJustification = AndJustification("Called (unmanaged) " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", [callJustification, selfJustification] + [argumentsJustification])
+    historyJustification = AndJustification("Called (unmanaged) " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", [callJustification, selfJustification] + [argumentsJustification])
     #historyJustification.interesting = False
     args = [historyJustification] + [info for info in argumentInfos]
-    count = len(args)
-    if count == 0:
-      result = nativeMethod()
-    elif count == 1:
-      result = nativeMethod(args[0])
-    elif count == 2:
-      result = nativeMethod(args[0], args[1])
-    elif count == 3:
-      result = nativeMethod(args[0], args[1], args[2])
-    elif count == 4:
-      result = nativeMethod(args[0], args[1], args[2], arg[3])
-    elif count == 5:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4])
-    elif count == 6:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5])
-    elif count == 7:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6])
-    elif count == 8:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7])
-    elif count == 9:
-      result = nativeMethod(args[0], args[1], args[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8])
-    else:
-      #TODO there must be a better way to do this
-      logger.fail("Too many arguments", AndJustifications(str(count) + " arguments", allJustifications))
+    result = functionUtils.unwrapAndCall(nativeMethod, args)
+    if result is None:
+      result = JustifiedValue(None, UnknownJustification())
     #info = JustifiedValue(result.value, AndJustification(str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ") = " + str(result), [result.justification]))
     #justification = FullJustification("unmanaged " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
     justification = FullJustification("unmanaged " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
@@ -1327,10 +1404,12 @@ class NativeSelfCall(LogicStatement):
 
 #for constructing
 class NativeConstructor(LogicStatement):
-  def __init__(self):
+  def __init__(self, argumentProviders=[]):
     super(NativeConstructor, self).__init__()
     self.managedObject_provider = Get("self")
     self.children.append(self.managedObject_provider)
+    self.argumentProviders = argumentProviders
+    self.children += self.argumentProviders
 
   def process(self, callJustification):
     managedObject_info = self.managedObject_provider.process(callJustification)
@@ -1338,7 +1417,9 @@ class NativeConstructor(LogicStatement):
     classInfo = managedObject.getInfo("__class__")
     classDefinition = classInfo.value
     constructor = classDefinition.constructor
-    managedObject.nativeObject = constructor()
+    argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
+    argumentValues = [info.value for info in argumentInfos]
+    managedObject.nativeObject = functionUtils.unwrapAndCall(constructor,  argumentValues)
 
 #the definition of a class that's implemented by a native class
 class NativeClassDefinition(object):
@@ -1360,9 +1441,21 @@ class NativeMethodDefinition(object):
     self.methodName = methodName
     self.argumentNames = argumentNames
     
-
-class ListWrapper(object):
+class NativeObject(object):
   def __init__(self):
+    return
+
+  def setManagedObject(self, managedObject):
+    self.managedObject = managedObject
+
+  def __repr__(self):
+    return str(self)
+
+  def __str__(self):
+    raise Exception("Called abstract method __str__ of " + super(NativeObject, self).__repr__())
+    
+class ListWrapper(NativeObject):
+  def __init__(self, callJustification):
     super(ListWrapper, self).__init__()
     self.justifications = []
     self.impl = []
@@ -1373,8 +1466,8 @@ class ListWrapper(object):
     self.impl.append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])))
     return JustifiedValue(None, callJustification)
 
-  def getItems(self, callJustification):
-    return JustifiedValue(self.impl, AndJustification("Contents of " + str(self) + " = " + str([info.value for info in self.impl]), [callJustification] + [info.justification for info in self.impl]))
+  #def getItems(self, callJustification):
+  #  return JustifiedValue(self.impl, AndJustification("Contents of " + str(self) + " = " + str([info.value for info in self.impl]), [callJustification] + [info.justification for info in self.impl]))
     
   def toString(self, callJustification):
     tostringInfos = []
@@ -1383,26 +1476,107 @@ class ListWrapper(object):
     for info in self.impl:
       value = info.value
       allJustifications.append(info.justification)
-      if hasattr(value, "callMethodName"):
-        elementInfo = value.callMethodName("toString", [], callJustification)
-        tostringInfos.append(elementInfo)
-        texts.append(elementInfo.value)
-        allJustifications.append(info.justification)
-      else:
-        #TODO should we make a StringWrapper class instead of type-checking here?
-        #calling toString of a native class is too simple to be worth explaining so we just skip explaining it (and below we explain how the element was put into the list to begin with)
-        texts.append(str(value))
-        
-    result =  "[" + ", ".join([text for text in texts]) + "]"
+      elementInfo = value.callMethodName("toString", [], callJustification)
+      tostringInfos.append(elementInfo)
+      texts.append(elementInfo.value)
+      allJustifications.append(info.justification)
+    result =  "[" + ", ".join([text.nativeObject.getText() for text in texts]) + "]"
     justificationText  =  "Returned List.toString() = " + result
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
-    return JustifiedValue(result, elementsJustification)
+    resultObject = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
+    return resultObject
+    #return JustifiedValue(result, elementsJustification)
+
+  def __str__(self):
+    return "ListWrapper"
+
+class StringWrapper(NativeObject):
+  def __init__(self, callJustification, textInfo):
+    #print("making stringwrapper as " + str(textInfo))
+    super(StringWrapper, self).__init__()
+    self.textInfo = textInfo
+    if not isinstance(textInfo.value, type("")):
+      logger.fail("Invalid class (not string) for " + str(textInfo))
+    #print("done making stringwrapper as " + str(textInfo))
+
+  def setManagedObject(self, managedObject):
+    super(StringWrapper, self).setManagedObject(managedObject)
+    self.managedObject.description = self.textInfo.value
+
+  def toString(self, callJustification):
+    #return JustifiedValue(self.textInfo.value, self.textInfo.justification)
+    #return JustifiedValue(self, self.textInfo.justification)
+    return JustifiedValue(self.managedObject, callJustification)
+
+  def split(self, callJustification, separatorInfo):
+    separator = separatorInfo.value
+    outputList = self.text.value.split(separator)
+    value = Object
+    objectInfo = self.execution.getScope().newObject("List", [], callJustification)
+    outputObject = outputInfo.value
+    justification = AndJustification(str(self) + ".split(" + str(separator) + ") = " + str(outputList), [callJustification, self.textInfo.justification, separatorInfo.justification])
+    return JustifiedValue(outputObject, justification)
+
+  def plus(self, callJustification, other):
+    if self.managedObject is None:
+      logger.fail("Invalid None managedObject for " + str(self) + " from ", self.textInfo.justification)
+    otherString = other.value.nativeObject
+    text = self.textInfo.value + otherString.textInfo.value
+    justification = AndJustification("concatenation = " + str(text), [callJustification, self.textInfo.justification, otherString.textInfo.justification])
+    newObject = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(text, justification)], callJustification)
+    return newObject
+
+  def equals(self, callJustification, otherInfo):
+    ourValue = self.getText()
+    other = otherInfo.value.nativeObject
+    theirValue = other.getText()
+    result = (ourValue == theirValue)
+    if result:
+      comparison = "=="
+    else:
+      comparison = "!="
+    justification = AndJustification(ourValue + comparison + theirValue, [self.textInfo.justification, other.textInfo.justification])
+    return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
+
+  def getText(self):
+    return self.textInfo.value
     
   def __str__(self):
-    return str(self.impl)
+    return str(self.getText())
 
-class DictionaryWrapper(object):
-  def __init__(self):
+class BoolWrapper(NativeObject):
+  def __init__(self, callJustification, valueInfo):
+    super(BoolWrapper, self).__init__()
+    self.valueInfo = valueInfo
+
+  def setManagedObject(self, managedObject):
+    super(BoolWrapper, self).setManagedObject(managedObject)
+    self.managedObject.description = str(self.valueInfo.value)
+
+  def toString(self, callJustification):
+    return self.managedObject.execution.getScope().newObject("String", [JustifiedValue(str(self.valueInfo.value), self.valueInfo.justification)], callJustification)
+
+  def isTrue(self):
+    return self.valueInfo.value
+
+  def equals(self, callJustification, otherInfo):
+    ourValue = self.isTrue()
+    other = otherInfo.value.nativeObject
+    theirValue = other.isTrue()
+    result = (ourValue == theirValue)
+    if result:
+      comparison = "=="
+    else:
+      comparison = "!="
+    justification = AndJustification(str(ourValue) + comparison + str(theirValue), [self.valueInfo.justification, other.valueInfo.justification])
+    return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
+
+
+  def __str__(self):
+    return str(self.valueInfo.value)
+
+class DictionaryWrapper(NativeObject):
+  def __init__(self, callJustification):
     super(DictionaryWrapper, self).__init__()
     self.items = {}
 
@@ -1415,6 +1589,23 @@ class DictionaryWrapper(object):
   def __str__(self):
     return str(self.items)
       
+class NumberWrapper(NativeObject):
+  def __init__(self, callJustification, numberInfo):
+    super(NumberWrapper, self).__init__()
+    self.numberInfo = numberInfo
+
+  def setManagedObject(self, managedObject):
+    super(NumberWrapper, self).setManagedObject(managedObject)
+    self.managedObject.description = str(self.numberInfo.value)
+
+  def getNumber(self):
+    return self.numberInfo.value
+
+  def nonEmpty(self, callJustification):
+    resultBool = (self.getNumber() is not None)
+    return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(resultBool, self.numberInfo.justification)], callJustification)
+
+
 
 #############################################################################################################################################################################################
 #some exceptions
@@ -1450,13 +1641,13 @@ class JustifiedShell(ValueProvider):
 
 
 def getModificationExpression():
-  return JustifiedShell(Const("stat --format %y jeffry.gaston.py  | grep -o 2016-10-05"))
+  return JustifiedShell(Str("stat --format %y jeffry.gaston.py  | grep -o 2016-10-05"))
 
 def get_currentHash_expression():
-  return JustifiedShell(Const("head -n `wc -l jeffry.gaston.py | sed 's/ .*//'` jeffry.gaston.py  | md5sum | sed 's/^/#/'"))
+  return JustifiedShell(Str("head -n `wc -l jeffry.gaston.py | sed 's/ .*//'` jeffry.gaston.py  | md5sum | sed 's/^/#/'"))
 
 def get_savedHash_expression():
-  return JustifiedShell(Const("tail -n 1 jeffry.gaston.py"))
+  return JustifiedShell(Str("tail -n 1 jeffry.gaston.py"))
 
 def make_fileModified_expression():
   return Eq(get_savedHash_expression(), get_currentHash_expression())
@@ -1467,11 +1658,11 @@ def equalityCheck():
   program = Program()
   storage = program.storage
   program.put([
-    Set(storage, "a", Const("one")),
-    Set(storage, "b", Const("two")),
+    Set(storage, "a", Str("one")),
+    Set(storage, "b", Str("two")),
     If(Eq(Get("a"), Get("b"))).then(
-      Set(storage, "result", Const("equal")),
-      Set(storage, "result", Const("different"))
+      Set(storage, "result", Str("equal")),
+      Set(storage, "result", Str("different"))
     )
   ])
   program.run()
@@ -1639,14 +1830,14 @@ def suggestion():
     #a Proposition without much logic - it just asks the Universe what its value is
     Class("TextProposition")
       .inherit("Proposition")
-      .vars({"text": "string"})
+      .vars({"text": "String"})
       .init(["text"], [
       ])
       .func("evaluate", ["universe"], [
         Return(DotCall(Get("universe"), "getProp", [SelfGet("text")])),
       ])
       .func("equals", ["other"], [
-        Return(Eq(SelfGet("text"), DotGet(Get("other"), "text"))),
+        Return(DotCall(SelfGet("text"), "equals", [DotGet(Get("other"), "text")])),
       ])
       .func("toString", [], [
         Return(SelfGet("text"))
@@ -1660,19 +1851,20 @@ def suggestion():
       ])
       .func("isSolved", ["universe"], [
         Var("result", DotCall(SelfGet("proposition"), "evaluate")),
-        If(Eq(Get("result"), Const(True))).then([
-          Return(Const(True)),
+        If(Eq(Get("result"), Bool(True))).then([
+          Return(Bool(True)),
         ]).otherwise([
-          Return(Const(False))
+          Return(Bool(False))
         ]),
       ])
       .func("equals", ["problem"], [
         Var("sameCheck", DotCall(SelfGet("proposition"), "equals", [DotGet(Get("problem"), "proposition")])),
-        If(Eq(Get("sameCheck"), Const(True))).then([
-          Var("sameOutcome", Eq(SelfGet("desiredOutcome"), DotGet(Get("problem"), "desiredOutcome"))),
+        #If(Eq(Get("sameCheck"), Bool(True))).then([
+        If(Get("sameCheck")).then([
+          Var("sameOutcome", DotCall(SelfGet("desiredOutcome"), "equals", [DotGet(Get("problem"), "desiredOutcome")])),
           Return(Get("sameOutcome")), #we could do fancy more-accurate things like checking for inverted checks with inverted outcomes, but we're not doing that for now
         ]).otherwise([
-          Return(Const(False)),
+          Return(Bool(False)),
         ])
       ])
       .func("toString", [], [
@@ -1686,13 +1878,13 @@ def suggestion():
       ])
       .func("toString", [], [
         Return(Concat([
-          Const('If "'),
+          Str('If "'),
           DotCall(SelfGet("prerequisite"), "toString"),
-          Const('" and "'),
+          Str('" and "'),
           DotCall(SelfGet("fix"), "toString"),
-          Const('" then "'),
+          Str('" then "'),
           DotCall(SelfGet("problem"), "toString"),
-          Const('" should be all set.'),
+          Str('" should be all set.'),
         ]))
       ]),
 
@@ -1709,17 +1901,19 @@ def suggestion():
       .func("trySolve", ["problem", "universe"], [
         Var("solutions", SelfCall("getDoableSolutions", [Get("problem"), Get("universe")])),
         Var("messages", New("List")),
-        ForEach("solution", DotCall(Get("solutions"), "getItems"), [
-          DotCall(Get("messages"), "append", [Concat([DotCall(Get("solution"), "toString"), Const("\n")])])
+        ForEach("solution", Get("solutions"), [
+          DotCall(Get("messages"), "append", [Concat([DotCall(Get("solution"), "toString"), Str("\n")])])
         ]),
         #Return(SelfCall("getDoableSolutions", [Get("problem"), Get("universe")]))
         Return(Get("messages"))
       ])
       .func("getRelevantDirectSolutions", ["problem"], [
         Var("relevantSolutions", New("List")),
-        ForEach("candidateSolution", DotCall(SelfGet("solutions"), "getItems"), [
+        ForEach("candidateSolution", SelfGet("solutions"), [
           If(DotCall(DotGet(Get("candidateSolution"), "problem"), "equals", [Get("problem")])).then([
             DotCall(Get("relevantSolutions"), "append", [Get("candidateSolution")])
+          ]).otherwise([
+            #ShortExplain(Get("problem"), Const(1))
           ]),
         ]),
         Return(Get("relevantSolutions"))
@@ -1727,10 +1921,10 @@ def suggestion():
       .func("getDoableSolutions", ["problem", "universe"], [
         Var("relevantSolutions", SelfCall("getRelevantDirectSolutions", [Get("problem")])),
         Var("doableSolutions", New("List")),
-        ForEach("candidateSolution", DotCall(Get("relevantSolutions"), "getItems"), [
+        ForEach("candidateSolution", Get("relevantSolutions"), [
           Var("prereq", DotGet(Get("candidateSolution"), "prerequisite")),
           Var("prereqState", DotCall(Get("prereq"), "evaluate", [Get("universe")])),
-          If(Eq(Get("prereqState"), Const(True))).then([
+          If(Eq(Get("prereqState"), Bool(True))).then([
             #found a solution whose prerequisite is met
             DotCall(Get("doableSolutions"), "append", [Get("candidateSolution")]),
           ]).otherwise([
@@ -1753,42 +1947,42 @@ def suggestion():
       Var("solver", New("Solver")),
 
       #prerequisites of solutions
-      Var("doesXWork", New("TextProposition", [Const("Does X work?")])),
-      Var("didYouFindHelp", New("TextProposition", [Const("Can you find a knowledgeable entity for this topic?")])),
-      Var("doYouUnderstandTheProblem", New("TextProposition", [Const("Do you understand the problem?")])),
-      Var("didYouFindHelpfulLogs", New("TextProposition", [Const("Did you find logs that are sufficiently helpful?")])),
-      Var("canYouFindAnyLogs", New("TextProposition", [Const("Did you find any logs?")])),
-      Var("canYouFindAVersionThatWorks", New("TextProposition", [Const("Can you find a version that works?")])),
-      Var("canYouAffordToWait", New("TextProposition", [Const("Can you afford to wait?")])),
-      Var("doYouHaveGoodSourceCode", New("TextProposition", [Const("Do you have easy-to-understand source code?")])),
-      Var("doYouHaveAnySourceCode", New("TextProposition", [Const("Do you have any source code?")])),
-      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Const("Do you understand the source code?")])),
-      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Const("Do you have an instant messenger?")])),
-      Var("doYouHaveInternet", New("TextProposition", [Const("Do you have internet access?")])),
+      Var("doesXWork", New("TextProposition", [Str("Does X work?")])),
+      Var("didYouFindHelp", New("TextProposition", [Str("Can you find a knowledgeable entity for this topic?")])),
+      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("Do you understand the problem?")])),
+      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("Did you find logs that are sufficiently helpful?")])),
+      Var("canYouFindAnyLogs", New("TextProposition", [Str("Did you find any logs?")])),
+      Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Can you find a version that works?")])),
+      Var("canYouAffordToWait", New("TextProposition", [Str("Can you afford to wait?")])),
+      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("Do you have easy-to-understand source code?")])),
+      Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Do you have any source code?")])),
+      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("Do you understand the source code?")])),
+      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Do you have an instant messenger?")])),
+      Var("doYouHaveInternet", New("TextProposition", [Str("Do you have internet access?")])),
       
       #problems (propositions with desired values)
-      Var("xWorks", New("Problem", [Get("doesXWork"), Const(True)])),
-      Var("youDidFindHelp", New("Problem", [Get("didYouFindHelp"), Const(True)])),
-      Var("youDoUnderstandTheProblem", New("Problem", [Get("doYouUnderstandTheProblem"), Const(True)])),
-      Var("youDidFindHelpfulLogs", New("Problem", [Get("didYouFindHelpfulLogs"), Const(True)])),
-      Var("youDoHaveGoodSourceCode", New("Problem", [Get("doYouHaveGoodSourceCode"), Const(True)])),
-      Var("youDoUnderstandTheSourceCode", New("Problem", [Get("doYouUnderstandTheSourceCode"), Const(True)])),
+      Var("xWorks", New("Problem", [Get("doesXWork"), Bool(True)])),
+      Var("youDidFindHelp", New("Problem", [Get("didYouFindHelp"), Bool(True)])),
+      Var("youDoUnderstandTheProblem", New("Problem", [Get("doYouUnderstandTheProblem"), Bool(True)])),
+      Var("youDidFindHelpfulLogs", New("Problem", [Get("didYouFindHelpfulLogs"), Bool(True)])),
+      Var("youDoHaveGoodSourceCode", New("Problem", [Get("doYouHaveGoodSourceCode"), Bool(True)])),
+      Var("youDoUnderstandTheSourceCode", New("Problem", [Get("doYouUnderstandTheSourceCode"), Bool(True)])),
 
       #fixes
-      Var("askForHelp", New("TextAction", [Const("Ask the knowledgeable entity for help.")])),
-      Var("justSolveIt", New("TextAction", [Const("Now that you understand the problem, just solve it.")])),
-      Var("readTheLogs", New("TextAction", [Const("Read the logs.")])),
-      Var("haveMeAnalyzeTheLogs", New("TextAction", [Const("Have me analyze the logs (this isn't implemented yet).")])),
-      Var("diffThem", New("TextAction", [Const("Look for differences using the bash command `diff -r directory1 directory2`.")])),
-      Var("waitUntilYouFeelRefreshed", New("TextAction", [Const("Take a break and return with a possibly fresh perspective.")])),
-      Var("waitUntilItHappensAgain", New("TextAction", [Const("Wait for the problem to happen again, at which point you might be more able to notice a pattern.")])),
-      Var("rerunTheProgram", New("TextAction", [Const("Run the program again.")])),
-      Var("improveTheSourceCode", New("TextAction", [Const("Improve the source code.")])),
-      Var("readTheSourceCode", New("TextAction", [Const("Read the source code.")])),
-      Var("readTheInstantMessengerNames", New("TextAction", [Const("Look at the names in the instant messenger.")])),
-      Var("openGoogle", New("TextAction", [Const("Open google.com in a web browser.")])),
-      Var("openCompanyWiki", New("TextAction", [Const("Open the company wiki in a web browser.")])),
-      Var("runGitLog", New("TextAction", [Const("Run `git log <filename>`.")])),
+      Var("askForHelp", New("TextAction", [Str("Ask the knowledgeable entity for help.")])),
+      Var("justSolveIt", New("TextAction", [Str("Now that you understand the problem, just solve it.")])),
+      Var("readTheLogs", New("TextAction", [Str("Read the logs.")])),
+      Var("haveMeAnalyzeTheLogs", New("TextAction", [Str("Have me analyze the logs (this isn't implemented yet).")])),
+      Var("diffThem", New("TextAction", [Str("Look for differences using the bash command `diff -r directory1 directory2`.")])),
+      Var("waitUntilYouFeelRefreshed", New("TextAction", [Str("Take a break and return with a possibly fresh perspective.")])),
+      Var("waitUntilItHappensAgain", New("TextAction", [Str("Wait for the problem to happen again, at which point you might be more able to notice a pattern.")])),
+      Var("rerunTheProgram", New("TextAction", [Str("Run the program again.")])),
+      Var("improveTheSourceCode", New("TextAction", [Str("Improve the source code.")])),
+      Var("readTheSourceCode", New("TextAction", [Str("Read the source code.")])),
+      Var("readTheInstantMessengerNames", New("TextAction", [Str("Look at the names in the instant messenger.")])),
+      Var("openGoogle", New("TextAction", [Str("Open google.com in a web browser.")])),
+      Var("openCompanyWiki", New("TextAction", [Str("Open the company wiki in a web browser.")])),
+      Var("runGitLog", New("TextAction", [Str("Run `git log <filename>`.")])),
 
       #You can make x work if you can find a knowledgeable entity and ask the knowledgeable entity for help
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("xWorks"), Get("didYouFindHelp"), Get("askForHelp")])]),
@@ -1827,7 +2021,7 @@ def suggestion():
       Return(Get("solver")),
 
       Var("solutionA", New("Solution", [Get("youDidFindHelp"), Get("doYouHaveAnySourceCode"), Get("runGitLog")])),
-      #Print(Const("sol a")),
+      #Print(Str("sol a")),
       #Print(DotCall(DotGet(Get("solutionA"), "problem"), "__str__")),
       #Print(DotCall(Get("solutionA"), "__str__")),
 
@@ -1837,16 +2031,16 @@ def suggestion():
 
     Var("solver", Call("makeSolver")),
 
-    Print(Const("Solutions:")),
+    Print(Str("Solutions:")),
     Print(DotCall(DotGet(Get("solver"), "solutions"), "toString")),
     #Explain(DotCall(DotGet(Get("solver"), "solutions"), "__str__")),
     #Print(DotGet(Get("solver"), "solutions")),
-    Print(Const("done")),
+    Print(Str("done")),
 
 
-    Print(Const("Relevant solutions:")),
+    #Print(Str("Relevant solutions:")),
     #ShortExplain(DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
-    Print(Const("done")),
+    #Print(Str("done")),
 
     #talks to the user, answers "why", forwards requests onto the Solver
     Class("Communicator")
@@ -1856,23 +2050,27 @@ def suggestion():
       .vars({"universe": "Universe"})
       .func("talkOnce", ["input"], [
         Var("justificationId", Int(Get("input"))),
-        Print(Const("")),
-        #Print(Const("responding")),
+        Print(Str("")),
+        #Print(Str("responding")),
 
-        If(Eq(Get("justificationId"), Const(None))).then([
-          Var("problem1", New("Problem", [New("TextProposition", [Get("input")]), Const(True)])),
-          Var("universe", SelfGet("universe")),
-          Print(Const("Relevant solutions:")),
-          ShortExplain(DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString"), Const(1)),
-          Print(Const("End of relevant solutions")),
-        ]).otherwise([
+        If(DotCall(Get("justificationId"), "nonEmpty")).then([
           ShortExplain(JustificationGetter(Get("justificationId")), Const(2)),
+        ]).otherwise([
+          Var("problem1", New("Problem", [New("TextProposition", [Get("input")]), Bool(True)])),
+          Var("universe", SelfGet("universe")),
+          Print(Str("Relevant solutions:")),
+          Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
+          #Var("result", DotCall(DotCall(Get("solver"), "getRelevantDirectSolutions", [Get("problem1")]), "toString")),
+          #Var("result", DotCall(Get("problem1"), "equals", [Get("problem1")])),
+          Print(DotCall(Get("result"), "toString")),
+          Print(Str("Because")),
+          ShortExplain(Get("result"), Const(1)),
         ]),
       ])
       .func("communicate", [], [
-        Print(Const("")),
-        While(Const(True), [
-          Var("response", Ask(Const("Say something!"))),
+        Print(Str("")),
+        While(Bool(True), [
+          Var("response", Ask(Str("Say something!"))),
           DotCall(Get("self"), "talkOnce", [Get("response")]),
         ]),
       ]),
@@ -1892,16 +2090,16 @@ def treeProgram():
     #prompt the user for a bool
     Func("readBool", ["prompt"], [
       Var("response", Ask(Get("prompt"))),
-      If(Eq(Get("response"), Const("Yes"))).then([
-        Return(Const(True))
+      If(Eq(Get("response"), Str("Yes"))).then([
+        Return(Bool(True))
       ]).otherwise([
-        If(Eq(Get("response"), Const("yes"))).then([
-          Return(Const(True))
+        If(Eq(Get("response"), Str("yes"))).then([
+          Return(Bool(True))
         ]).otherwise([
-          If(Eq(Get("response"), Const("y"))).then([
-            Return(Const(True))
+          If(Eq(Get("response"), Str("y"))).then([
+            Return(Bool(True))
           ]).otherwise([
-            Return(Const(False))
+            Return(Bool(False))
           ])
         ])
       ])
@@ -1910,34 +2108,34 @@ def treeProgram():
     Var("suggestion", Const(None)),
 
     #see if the user should read the logs
-    Var("didReadLogs", Call("readBool", [Const("Have you read the logs?")])),
-    If(Eq(Get("didReadLogs"), Const(False))).then([
-      Var("canFindTheLogs", Call("readBool", [Const("Do you know where to find logs?")])),
+    Var("didReadLogs", Call("readBool", [Str("Have you read the logs?")])),
+    If(Eq(Get("didReadLogs"), Bool(False))).then([
+      Var("canFindTheLogs", Call("readBool", [Str("Do you know where to find logs?")])),
       If(Get("canFindTheLogs")).then([
-        Set("suggestion", Const("Read the logs."))
+        Set("suggestion", Str("Read the logs."))
       ]).otherwise([
-        Var("triedFindingLogs", Call("readBool", [Const("Have you spent at least 1 hour trying to find the logs?")])),
+        Var("triedFindingLogs", Call("readBool", [Str("Have you spent at least 1 hour trying to find the logs?")])),
         If(Get("triedFindingLogs")).otherwise([
-          Set("suggestion", Const("Your new subtask is to try to read the logs. Note that you can ask me for help with that task too."))
+          Set("suggestion", Str("Your new subtask is to try to read the logs. Note that you can ask me for help with that task too."))
         ])
       ])
     ]),
 
     #some more suggestions
     If(Eq(Get("suggestion"), Const(None))).then([
-      Var("haveYouGoogledIt", Call("readBool", [Const("Have you googled it?")])),
+      Var("haveYouGoogledIt", Call("readBool", [Str("Have you googled it?")])),
       If(Get("haveYouGoogledIt")).then([
-        Var("haveYouAskedSomeone", Call("readBool", [Const("Have you asked a human for help?")])),
+        Var("haveYouAskedSomeone", Call("readBool", [Str("Have you asked a human for help?")])),
         If(Get("haveYouAskedSomeone")).otherwise([
-          Set("suggestion", Const("Ask someone"))
+          Set("suggestion", Str("Ask someone"))
         ])
       ]).otherwise([
-        Set("suggestion", Const("Google it"))
+        Set("suggestion", Str("Google it"))
       ])
     ]),
 
     If(Eq(Get("suggestion"), Const(None))).then([
-      Set("suggestion", Const("I'm not sure"))
+      Set("suggestion", Str("I'm not sure"))
     ])
   ])
   execution = Execution(program)
@@ -1950,30 +2148,30 @@ def inheritanceTest():
   program.put([
     Class("TestGrandParent")
       .init([], [
-        Print(Const("running init in TestGrandParent class"))
+        Print(Str("running init in TestGrandParent class"))
       ])
       .func("talk", [], [
-        Print(Const("running talk in TestGrandParent class")),
+        Print(Str("running talk in TestGrandParent class")),
       ]),
     Class("TestParent")
       .inherit("TestGrandParent")
       .init([], [
-        Print(Const("running init in TestParent class")),
+        Print(Str("running init in TestParent class")),
         SuperCall("__init__"),
         SelfCall("talk")
       ])
       .func("talk", [], [
-        Print(Const("running talk in TestParent class")),
+        Print(Str("running talk in TestParent class")),
         SuperCall("talk"),
       ]),
     Class("TestChild")
       .inherit("TestParent")
       .init([], [
-        Print(Const("running init in TestChild class")),
+        Print(Str("running init in TestChild class")),
         SuperCall("__init__"),
       ])
       .func("talk", [], [
-        Print(Const("running talk in TestChild class")),
+        Print(Str("running talk in TestChild class")),
         SuperCall("talk"),
       ]),
 
@@ -1992,7 +2190,7 @@ def argTest():
         Print(SelfGet("key2"))
       ]),
 
-    Var("a", New("ArgTester", [Const("abcd")])),
+    Var("a", New("ArgTester", [Str("abcd")])),
   ])
   return program
 
