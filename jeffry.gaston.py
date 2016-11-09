@@ -288,7 +288,7 @@ class Scope(object):
       #after having used the scope of the class to find the function, now use the execution scope to actually call that function
       executionScope = self
       executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, callJustification)
-    justification = AndJustification("New " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
+    justification = AndJustification("newObject " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
     return JustifiedValue(newObject, justification)
 
 
@@ -782,6 +782,22 @@ class FullJustification(Justification):
     message += stringUtils.toVariableText(self.variableName) + " = " + str(self.value)
     return message
 
+  def getInterestingChildren(self):
+    if self.interesting:
+      return super(FullJustification, self).getInterestingChildren()
+    else:
+      #if this justification is not interesting, then the reason that it was called isn't interesting either - only recurse into children that supply values
+      results = []
+      for child in self.valueJustifications:
+        if child.interesting:
+          results.append(child)
+        else:
+          for descendent in child.getInterestingChildren():
+            if descendent not in results:
+              results.append(descendent)
+      return results
+
+
   def explainRecursive(self, maxDepth=-1):
     description = self.describeWithId()
     newlineDash = "\n|-"
@@ -980,10 +996,12 @@ class Eq(ValueProvider):
     description += str(self.provider2)
     #return JustifiedValue(matches, AndJustification(description, [EqualJustification('value 1', info1.value, info1.justification), EqualJustification('value 2', info2.value, info2.justification)]))
     justification1 = FullJustification(str(self.provider1), info1.value, self.lineNumber, callJustification, [info1.justification])
-    justification2 = FullJustification(str(self.provider2), info1.value, self.lineNumber, callJustification, [info2.justification])
+    justification2 = FullJustification(str(self.provider2), info2.value, self.lineNumber, callJustification, [info2.justification])
     justification = AndJustification(description, [justification1, justification2])
     justifiedValue = JustifiedValue(matches, justification)
-    return self.execution.getScope().newObject("Bool", [justifiedValue], callJustification)
+    resultInfo = self.execution.getScope().newObject("Bool", [justifiedValue], callJustification)
+    resultInfo.justification.interesting = False #users won't be interested in the fact that we allocated a managed object to store the results of the comparison; they're be more likely to be interested in why the result was what it was
+    return resultInfo
 
   def getChildren(self):
     return [self.provider1, self.provider2]
@@ -1015,7 +1033,7 @@ class Plus(ValueProvider):
 
     justifications = [info.justification for info in infos]
     #return JustifiedValue(sum, AndJustification(self.getVariableName() + " equals " + str(sum) + " (in " + str(self.definitionScope) + ")", justifications))
-    justification = FullJustification(self.getVariableName(), sum, self.lineNumber, callJustification, justifications)
+    justification = FullJustification(str(self), sum, self.lineNumber, callJustification, justifications)
     return JustifiedValue(sum.value, justification)
 
   def getChildren(self):
@@ -1155,13 +1173,13 @@ class New(ValueProvider):
     self.className = className
     self.argumentProviders = argumentProviders
 
-  def process(self, justification):
-    argumentInfos = [item.process(justification) for item in self.argumentProviders]
-    justifications = [justification] + [item.justification for item in argumentInfos]
-    numNonSelfParameters = len(justifications) - 1
+  def process(self, callJustification):
+    argumentInfos = [item.process(callJustification) for item in self.argumentProviders]
+    callJustifications = [callJustification] + [item.justification for item in argumentInfos]
+    numNonSelfParameters = len(callJustifications) - 1
 
     text = "new " + str(self.className) + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
-    result = self.execution.getScope().newObject(self.className, argumentInfos, AndJustification(text, justifications))
+    result = self.execution.getScope().newObject(self.className, argumentInfos, AndJustification(text, callJustifications))
     return result
 
   def getChildren(self):
@@ -1379,26 +1397,20 @@ class NativeSelfCall(LogicStatement):
     nativeObject = managedObject.nativeObject
     argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
     argsText = "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
-    #argumentsJustification = AndJustification(argsText, [info.justification for info in argumentInfos])
-    argumentsJustification = FullJustification("arguments", argsText, self.lineNumber, callJustification, [info.justification for info in argumentInfos])
-    #for info in argumentInfos:
-    #  if not isinstance(info.value, Object):
-    #    logger.fail("Invalid object " + str(info.value) + " (not an Object) passed to " + str(managedObject) + "." + str(self.methodName), info.justification)
+    argumentsJustification = FullJustification(self.methodName + " arguments", argsText, self.lineNumber, callJustification, [info.justification for info in argumentInfos])
     allJustifications = [callJustification] + [info.justification for info in argumentInfos]
     try:
       nativeMethod = getattr(nativeObject, self.methodName)
     except Exception as e:
       logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification, argumentsJustification]))
     historyJustification = AndJustification("Called (unmanaged) " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", [callJustification, selfJustification] + [argumentsJustification])
-    #historyJustification.interesting = False
+    historyJustification.interesting = False #we don't expect the user to be interested in knowing that we made an unmanaged call to implement their code
     args = [historyJustification] + [info for info in argumentInfos]
     result = functionUtils.unwrapAndCall(nativeMethod, args)
     if result is None:
       result = JustifiedValue(None, UnknownJustification())
-    #info = JustifiedValue(result.value, AndJustification(str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ") = " + str(result), [result.justification]))
-    #justification = FullJustification("unmanaged " + str(nativeObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
     justification = FullJustification("unmanaged " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
-    #justification.interesting = False
+    justification.interesting = False #users probably don't care to to think about how many calls we made to implement their function call
     self.execution.getScope().declareInfo("return", JustifiedValue(result.value, justification))
     return result
 
@@ -1479,13 +1491,12 @@ class ListWrapper(NativeObject):
       elementInfo = value.callMethodName("toString", [], callJustification)
       tostringInfos.append(elementInfo)
       texts.append(elementInfo.value)
-      allJustifications.append(info.justification)
     result =  "[" + ", ".join([text.nativeObject.getText() for text in texts]) + "]"
     justificationText  =  "Returned List.toString() = " + result
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
-    resultObject = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
-    return resultObject
-    #return JustifiedValue(result, elementsJustification)
+    resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
+    resultInfo.justification.interesting = False #the user won't be interested in the fact that we're creating a String object here; they're be interested in the components that went into it
+    return resultInfo
 
   def __str__(self):
     return "ListWrapper"
@@ -1523,8 +1534,9 @@ class StringWrapper(NativeObject):
     otherString = other.value.nativeObject
     text = self.textInfo.value + otherString.textInfo.value
     justification = AndJustification("concatenation = " + str(text), [callJustification, self.textInfo.justification, otherString.textInfo.justification])
-    newObject = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(text, justification)], callJustification)
-    return newObject
+    resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(text, justification)], callJustification)
+    resultInfo.justification.interesting = False #users won't care that we allocated a managed boolean to hold the results of the comparison
+    return resultInfo
 
   def equals(self, callJustification, otherInfo):
     ourValue = self.getText()
@@ -1569,7 +1581,9 @@ class BoolWrapper(NativeObject):
     else:
       comparison = "!="
     justification = AndJustification(str(ourValue) + comparison + str(theirValue), [self.valueInfo.justification, other.valueInfo.justification])
-    return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
+    resultInfo = self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
+    resultInfo.interesting = False #users probably won't care that we created a managed boolean to hold the results of the comparison; they're probably more interested in the reason for the result of the comparison
+    return resultInfo
 
 
   def __str__(self):
@@ -2054,7 +2068,7 @@ def suggestion():
         #Print(Str("responding")),
 
         If(DotCall(Get("justificationId"), "nonEmpty")).then([
-          ShortExplain(JustificationGetter(Get("justificationId")), Const(2)),
+          ShortExplain(JustificationGetter(Get("justificationId")), Const(1)),
         ]).otherwise([
           Var("problem1", New("Problem", [New("TextProposition", [Get("input")]), Bool(True)])),
           Var("universe", SelfGet("universe")),
