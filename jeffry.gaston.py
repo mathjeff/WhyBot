@@ -106,7 +106,6 @@ class Program(object):
     self.statements = []
     self.nativeClasses = [
       NativeClassDefinition("String", (lambda why, text: StringWrapper(why, text)), [
-        NativeMethodDefinition("__init__", ["text"]),
         NativeMethodDefinition("split", ["separator"]),
         NativeMethodDefinition("toString", []),
         NativeMethodDefinition("plus", ["other"]),
@@ -114,7 +113,6 @@ class Program(object):
       ]),
       NativeClassDefinition("List", (lambda why: ListWrapper(why)), [
         NativeMethodDefinition("append", ["item"]),
-        #NativeMethodDefinition("getItems", []),
         NativeMethodDefinition("toString", []),
       ]),
       NativeClassDefinition("Dict", (lambda why: DictionaryWrapper(why)), [
@@ -256,44 +254,51 @@ class Scope(object):
     for fieldName in classDefinition.fieldTypes.keys(): #unfortunately the data types aren't validated yet, but they come in handy for readibility for now
       newObject.declareInfo(fieldName, JustifiedValue(None, TextJustification("The default value for a member variable is None")))
     
-    
+
+
   def newObject(self, className, justifiedArguments, callJustification):
     classInfo = self.tryGetInfo(className)
     if classInfo is None:
       logger.fail("Class " + str(className) + " is not defined", justification)
     classDefinition = classInfo.value
 
-    #objectDescription = "instance of " + className
     parentClassName = classDefinition.parentClassName
-    newObject = self.newChild()
-    #newObject.description = objectDescription
+    newObject = classDefinition.newInstance(self, justifiedArguments, callJustification)
+
     newObject.description = className + "@" + str(newObject.objectId)
 
+    justification = AndJustification("newObject " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
+    return JustifiedValue(newObject, justification)
 
+  def newManagedObject(self, classDefinition, justifiedArguments, callJustification):
+    newObject = self.newChild()
     #put empty values onto the object
     self.makeEmptyFields(classDefinition, newObject)
     implScope = classDefinition.implementedInScope
-    #for itemName in implScope.data.keys():
-    #  item = implScope.data[itemName]
-    #  newObject.declareInfo(itemName, JustifiedValue(item.value, TextJustification("This value is defined in the class definition")))
-    newObject.declareInfo("__class__", JustifiedValue(classDefinition, TextJustification("This is the class of the object")))
-    if isinstance(classDefinition, NativeClassDefinition):
-      #it would be nice move the 'newObject.nativeObject = constructor()' into a parent method, but we can't even call that parent method until newObject.nativeObject has been set
-      constructor = classDefinition.constructor
-      argumentInfos = [UnknownJustification()] + justifiedArguments
-      newObject.nativeObject = functionUtils.unwrapAndCall(constructor, argumentInfos)
-      #print("saving managedObject = " + str(newObject) + " on " + str(newObject.nativeObject))
-      newObject.nativeObject.setManagedObject(newObject)
-    #else:
-    #  print("no managed object to save for " + str(newObject))
-    initInfo = classDefinition.implementedInScope.tryGetInfo("__init__")
 
+    self.attachClassDefinition(newObject, classDefinition)
+
+    initInfo = classDefinition.implementedInScope.tryGetInfo("__init__")
     if initInfo is not None:
       #after having used the scope of the class to find the function, now use the execution scope to actually call that function
       executionScope = self
-      executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified to create an empty " + str(className)))] + justifiedArguments, callJustification)
-    justification = AndJustification("newObject " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
-    return JustifiedValue(newObject, justification)
+      executionScope.callFunction(initInfo.value, [JustifiedValue(newObject, TextJustification("my program specified a " + str(classDefinition.className)))] + justifiedArguments, callJustification)
+    else:
+      if len(justifiedArguments) != 0:
+        logger.fail("Incorrect number of arguments; required 0, received " + str(justifiedArguments), callJustification)
+    return newObject
+
+  def newNativeObject(self, classDefinition, justifiedArguments, callJustification):
+    newObject = functionUtils.unwrapAndCall(classDefinition.constructor, [callJustification] + [info for info in justifiedArguments])
+    self.attachClassDefinition(newObject, classDefinition)
+    newObject.execution = self.execution
+    return newObject
+
+  def attachClassDefinition(self, newObject, classDefinition):
+    newObject.declareInfo("__class__", JustifiedValue(classDefinition, TextJustification("This is the class of the object")))
+    
+
+
 
 
   def __str__(self):
@@ -471,7 +476,7 @@ class If(LogicStatement):
     result = self.condition.process(callJustification)
     description = str(self) + " was evaluated as " + str(result.value)
     childJustification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
-    if result.value.nativeObject.isTrue():
+    if result.value.isTrue():
       for trueEffect in self.trueEffects:
         trueEffect.process(childJustification)
     else:
@@ -498,7 +503,7 @@ class ForEach(LogicStatement):
     valuesJustification = valueInfos.justification
     loopScope.declareInfo(self.variableName, JustifiedValue(None, TextJustification("Initialized by ForEach loop")))
     values = valueInfos.value
-    for valueInfo in values.nativeObject.impl:
+    for valueInfo in values.impl:
       value = valueInfo.value
       justification = FullJustification(str(self.variableName), value, self.lineNumber, callJustification, [valuesJustification, valueInfo.justification])
 
@@ -915,7 +920,7 @@ class Int(ValueProvider):
   def process(self, callJustification):
     inputInfo = self.inputProvider.process(callJustification)
     try:
-      outputValue = int(inputInfo.value.nativeObject.getText())
+      outputValue = int(inputInfo.value.getText())
     except ValueError as e:
       outputValue = None
     return self.execution.getScope().newObject("Num", [JustifiedValue(outputValue, UnknownJustification())], callJustification)
@@ -938,7 +943,7 @@ class JustificationGetter(ValueProvider):
     idInfo  = self.idProvider.process(callJustification)
     value = idInfo.value
     if value is not None:
-      justification = justificationsById[value.nativeObject.getNumber()]
+      justification = justificationsById[value.getNumber()]
       return JustifiedValue(justification, justification)
     else:
       return JustifiedValue(None, callJustification)
@@ -955,7 +960,7 @@ class Ask(ValueProvider):
     self.promptProvider = promptProvider
 
   def process(self, callJustification):
-    prompt = self.promptProvider.process(callJustification).value.nativeObject.getText()
+    prompt = self.promptProvider.process(callJustification).value.getText()
     try:
       enteredText = raw_input(prompt)
     except EOFError as e:
@@ -984,11 +989,11 @@ class Eq(ValueProvider):
     info1 = self.provider1.process(callJustification)
     info2 = self.provider2.process(callJustification)
     if info1.value is not None:
-      value1 = info1.value.nativeObject
+      value1 = info1.value
     else:
       value1 = None
     if info2.value is not None:
-      value2 = info2.value.nativeObject
+      value2 = info2.value
     else:
       value2 = None
     matches = (value1 == value2)
@@ -1081,7 +1086,7 @@ class Print(LogicStatement):
     #it only gets invoked when other lines of code directly invoke it
 
     info = self.messageProvider.process(justification)
-    logger.message(info.value.nativeObject.getText())
+    logger.message(info.value.getText())
     return info
 
   def __str__(self):
@@ -1127,6 +1132,10 @@ class ClassDefinition(object):
     self.fieldTypes = fieldTypes
     self.implementedInScope = None
     self.methodDefiners = methodDefiners
+
+  def newInstance(self, scope, justifiedArguments, callJustification):
+    return scope.newManagedObject(self, justifiedArguments, callJustification)
+
 
   def __str__(self):
     return "classdef:" + str(self.className)
@@ -1284,7 +1293,7 @@ class ClassFromObject_Scope(ValueProvider):
     objectValue = objectInfo.value
     justification = AndJustification("Check class of " + str(objectValue), [callJustification, EqualJustification("method owner", objectValue, objectInfo.justification)])
     try:
-      classInfo = objectValue.tryGetInfo("__class__")
+      classInfo = objectValue.getInfo("__class__")
     except Exception as e:
       logger.fail(str(self) + " failed", justification)
     classDefinition = classInfo.value
@@ -1398,7 +1407,7 @@ class NativeSelfCall(LogicStatement):
     managedObject_info = self.managedObject_provider.process(callJustification)
     managedObject = managedObject_info.value
     selfJustification = managedObject_info.justification
-    nativeObject = managedObject.nativeObject
+    nativeObject = managedObject
     argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
     argsText = "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
     argumentsJustification = FullJustification(self.methodName + " arguments", argsText, self.lineNumber, callJustification, [info.justification for info in argumentInfos])
@@ -1418,25 +1427,6 @@ class NativeSelfCall(LogicStatement):
     self.execution.getScope().declareInfo("return", JustifiedValue(result.value, justification))
     return result
 
-#for constructing
-class NativeConstructor(LogicStatement):
-  def __init__(self, argumentProviders=[]):
-    super(NativeConstructor, self).__init__()
-    self.managedObject_provider = Get("self")
-    self.children.append(self.managedObject_provider)
-    self.argumentProviders = argumentProviders
-    self.children += self.argumentProviders
-
-  def process(self, callJustification):
-    managedObject_info = self.managedObject_provider.process(callJustification)
-    managedObject = managedObject_info.value
-    classInfo = managedObject.getInfo("__class__")
-    classDefinition = classInfo.value
-    constructor = classDefinition.constructor
-    argumentInfos = [provider.process(callJustification) for provider in self.argumentProviders]
-    argumentValues = [info.value for info in argumentInfos]
-    managedObject.nativeObject = functionUtils.unwrapAndCall(constructor,  argumentValues)
-
 #the definition of a class that's implemented by a native class
 class NativeClassDefinition(object):
   def __init__(self, managedClassName, constructor, methodDefinitions):
@@ -1448,6 +1438,9 @@ class NativeClassDefinition(object):
     self.fieldTypes = {}
     self.implementedInScope = None
 
+  def newInstance(self, scope, justifiedArguments, callJustification):
+    return scope.newNativeObject(self, justifiedArguments, callJustification)
+
   def __str__(self):
     return "native classdef:" + str(self.managedClassName)
 
@@ -1457,18 +1450,11 @@ class NativeMethodDefinition(object):
     self.methodName = methodName
     self.argumentNames = argumentNames
     
-class NativeObject(object):
+class NativeObject(Object):
   def __init__(self):
-    return
-
-  def setManagedObject(self, managedObject):
-    self.managedObject = managedObject
-
-  def __repr__(self):
-    return str(self)
-
-  def __str__(self):
-    raise Exception("Called abstract method __str__ of " + super(NativeObject, self).__repr__())
+    super(NativeObject, self).__init__(None)
+    self.managedObject = self
+    self.nativeObject = self
     
 class ListWrapper(NativeObject):
   def __init__(self, callJustification):
@@ -1487,15 +1473,15 @@ class ListWrapper(NativeObject):
     
   def toString(self, callJustification):
     tostringInfos = []
-    texts = []
+    textObjects = []
     allJustifications = []
     for info in self.impl:
       value = info.value
       allJustifications.append(info.justification)
       elementInfo = value.callMethodName("toString", [], callJustification)
       tostringInfos.append(elementInfo)
-      texts.append(elementInfo.value)
-    result =  "[" + ", ".join([text.nativeObject.getText() for text in texts]) + "]"
+      textObjects.append(elementInfo.value)
+    result =  "[" + ", ".join([obj.getText() for obj in textObjects]) + "]"
     justificationText  =  "Returned List.toString() = " + result
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
     resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
@@ -1535,7 +1521,7 @@ class StringWrapper(NativeObject):
   def plus(self, callJustification, other):
     if self.managedObject is None:
       logger.fail("Invalid None managedObject for " + str(self) + " from ", self.textInfo.justification)
-    otherString = other.value.nativeObject
+    otherString = other.value
     text = self.textInfo.value + otherString.textInfo.value
     justification = AndJustification("concatenation = " + str(text), [callJustification, self.textInfo.justification, otherString.textInfo.justification])
     resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(text, justification)], callJustification)
@@ -1544,7 +1530,7 @@ class StringWrapper(NativeObject):
 
   def equals(self, callJustification, otherInfo):
     ourValue = self.getText()
-    other = otherInfo.value.nativeObject
+    other = otherInfo.value
     theirValue = other.getText()
     result = (ourValue == theirValue)
     if result:
@@ -1577,7 +1563,7 @@ class BoolWrapper(NativeObject):
 
   def equals(self, callJustification, otherInfo):
     ourValue = self.isTrue()
-    other = otherInfo.value.nativeObject
+    other = otherInfo.value
     theirValue = other.isTrue()
     result = (ourValue == theirValue)
     if result:
