@@ -1,3 +1,7 @@
+# Sorry about writing this program in Python instead of a language supporting static typing such as C#, Java or Groovy
+# I wanted this program to be trivially easy to download, run, edit, and rerun, rather than just fairly easy
+# Hopefully I'll rewrite this program in another language eventually
+
 import subprocess
 import traceback
 import sys
