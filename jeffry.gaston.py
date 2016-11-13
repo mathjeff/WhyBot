@@ -1506,12 +1506,17 @@ class StringWrapper(NativeObject):
     return JustifiedValue(self.managedObject, callJustification)
 
   def split(self, callJustification, separatorInfo):
-    separator = separatorInfo.value
-    outputList = self.text.value.split(separator)
-    value = Object
-    objectInfo = self.execution.getScope().newObject("List", [], callJustification)
+    separator = separatorInfo.value.getText()
+    text = self.getText()
+    outputList = text.split(separator)
+    outputInfo = self.execution.getScope().newObject("List", [], callJustification)
+    outputInfo.justification.interesting = False
     outputObject = outputInfo.value
     justification = AndJustification(str(self) + ".split(" + str(separator) + ") = " + str(outputList), [callJustification, self.textInfo.justification, separatorInfo.justification])
+    for item in outputList:
+      itemInfo = self.execution.getScope().newObject("String", [JustifiedValue(item, justification)], justification)
+      itemInfo.justification.interesting = False
+      outputObject.append(justification, itemInfo)
     return JustifiedValue(outputObject, justification)
 
   def plus(self, callJustification, other):
@@ -2054,7 +2059,9 @@ def suggestion():
           Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
           #Var("result", DotCall(DotCall(Get("solver"), "getRelevantDirectSolutions", [Get("problem1")]), "toString")),
           #Var("result", DotCall(Get("problem1"), "equals", [Get("problem1")])),
-          Print(DotCall(Get("result"), "toString")),
+          Var("resultText", DotCall(Get("result"), "toString")),
+          #ShortExplain(DotCall(DotCall(Str("abc de f ghi jk lmn opqrstuv wx y z"), "split", [Str(" ")]), "toString"), Const(1)),
+          Print(Get("resultText")),
           Print(Str("Because")),
           ShortExplain(Get("result"), Const(1)),
         ]),
