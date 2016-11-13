@@ -1500,10 +1500,6 @@ class StringWrapper(NativeObject):
       logger.fail("Invalid class (not string) for " + str(textInfo))
     #print("done making stringwrapper as " + str(textInfo))
 
-  def setManagedObject(self, managedObject):
-    super(StringWrapper, self).setManagedObject(managedObject)
-    self.managedObject.description = self.textInfo.value
-
   def toString(self, callJustification):
     #return JustifiedValue(self.textInfo.value, self.textInfo.justification)
     #return JustifiedValue(self, self.textInfo.justification)
@@ -1551,10 +1547,6 @@ class BoolWrapper(NativeObject):
     super(BoolWrapper, self).__init__()
     self.valueInfo = valueInfo
 
-  def setManagedObject(self, managedObject):
-    super(BoolWrapper, self).setManagedObject(managedObject)
-    self.managedObject.description = str(self.valueInfo.value)
-
   def toString(self, callJustification):
     return self.managedObject.execution.getScope().newObject("String", [JustifiedValue(str(self.valueInfo.value), self.valueInfo.justification)], callJustification)
 
@@ -1597,10 +1589,6 @@ class NumberWrapper(NativeObject):
   def __init__(self, callJustification, numberInfo):
     super(NumberWrapper, self).__init__()
     self.numberInfo = numberInfo
-
-  def setManagedObject(self, managedObject):
-    super(NumberWrapper, self).setManagedObject(managedObject)
-    self.managedObject.description = str(self.numberInfo.value)
 
   def getNumber(self):
     return self.numberInfo.value
