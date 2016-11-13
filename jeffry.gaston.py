@@ -113,6 +113,8 @@ class Program(object):
       ]),
       NativeClassDefinition("List", (lambda why: ListWrapper(why)), [
         NativeMethodDefinition("append", ["item"]),
+        NativeMethodDefinition("get", ["index"]),
+        NativeMethodDefinition("tryGet", ["index"]),
         NativeMethodDefinition("toString", []),
       ]),
       NativeClassDefinition("Dict", (lambda why: DictionaryWrapper(why)), [
@@ -919,10 +921,13 @@ class Int(ValueProvider):
 
   def process(self, callJustification):
     inputInfo = self.inputProvider.process(callJustification)
-    try:
-      outputValue = int(inputInfo.value.getText())
-    except ValueError as e:
-      outputValue = None
+    outputValue = None
+    inputText = inputInfo.value
+    if inputText is not None:
+      try:
+        outputValue = int(inputText.getText())
+      except ValueError as e:
+        pass
     return self.execution.getScope().newObject("Num", [JustifiedValue(outputValue, UnknownJustification())], callJustification)
     #justification = FullJustification("int(" + str(inputInfo.value) + ")", outputObject, self.lineNumber, callJustification, [inputInfo.justification])
     #return JustifiedValue(outputObject, justification)
@@ -1092,6 +1097,19 @@ class Print(LogicStatement):
   def __str__(self):
     return "Print(" + str(self.messageProvider) + ")"
 
+class PrintWithId(Print):
+  def __init__(self, messageProvider):
+    super(PrintWithId, self).__init__(messageProvider)
+
+  def process(self, justification):
+    info = self.messageProvider.process(justification)
+    logger.message(info.justification.describeWithId())
+    return info
+
+  def __str__(self):
+    return "FullExplain(" + str(self.messageProvider) + ")"
+
+
 class FullExplain(Print):
   def __init__(self, messageProvider):
     super(FullExplain, self).__init__(messageProvider)
@@ -1208,6 +1226,10 @@ class Str(New):
 class Bool(New):
   def __init__(self, value):
     super(Bool, self).__init__("Bool", [Const(value)])
+
+class Num(New):
+  def __init__(self, value):
+    super(Num, self).__init__("Num", [Const(value)])
 
 #sets a property of an object - nearly the same as Set
 class DotSet(LogicStatement):
@@ -1468,8 +1490,25 @@ class ListWrapper(NativeObject):
     self.impl.append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])))
     return JustifiedValue(None, callJustification)
 
-  #def getItems(self, callJustification):
-  #  return JustifiedValue(self.impl, AndJustification("Contents of " + str(self) + " = " + str([info.value for info in self.impl]), [callJustification] + [info.justification for info in self.impl]))
+  def get(self, callJustification, indexInfo):
+    index = indexInfo.value.getNumber()
+    itemInfo = self.impl[index]
+    item = itemInfo.value
+    justification = AndJustification("returned " + str(self) + "[" + str(index) + "] = " + str(item), [itemInfo.justification, callJustification, indexInfo.justification])
+    return JustifiedValue(item, justification)
+
+  def tryGet(self, callJustification, indexInfo):
+    index = indexInfo.value.getNumber()
+    if index >= len(self.impl):
+      itemJustification = TextJustification("index (" + str(index) + ") is past the end of " + str(self) + " (" + str(len(self.impl)) + ")")
+      itemInfo = self.execution.getScope().newObject("String", [JustifiedValue(None, itemJustification)], callJustification)
+      item = itemInfo.value
+    else:
+      itemInfo = self.impl[index]
+      item = itemInfo.value
+      itemJustification = itemInfo.justification
+    justification = AndJustification("returned " + str(self) + "[" + str(index) + "] = " + str(item), [itemJustification, callJustification, indexInfo.justification])
+    return JustifiedValue(item, justification)
     
   def toString(self, callJustification):
     tostringInfos = []
@@ -1496,13 +1535,11 @@ class StringWrapper(NativeObject):
     #print("making stringwrapper as " + str(textInfo))
     super(StringWrapper, self).__init__()
     self.textInfo = textInfo
-    if not isinstance(textInfo.value, type("")):
+    if textInfo.value is not None and not isinstance(textInfo.value, type("")):
       logger.fail("Invalid class (not string) for " + str(textInfo))
     #print("done making stringwrapper as " + str(textInfo))
 
   def toString(self, callJustification):
-    #return JustifiedValue(self.textInfo.value, self.textInfo.justification)
-    #return JustifiedValue(self, self.textInfo.justification)
     return JustifiedValue(self.managedObject, callJustification)
 
   def split(self, callJustification, separatorInfo):
@@ -1538,7 +1575,7 @@ class StringWrapper(NativeObject):
       comparison = "=="
     else:
       comparison = "!="
-    justification = AndJustification(ourValue + comparison + theirValue, [self.textInfo.justification, other.textInfo.justification])
+    justification = AndJustification(str(ourValue) + str(comparison) + str(theirValue), [self.textInfo.justification, other.textInfo.justification])
     return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
 
   def getText(self):
@@ -1601,6 +1638,9 @@ class NumberWrapper(NativeObject):
   def nonEmpty(self, callJustification):
     resultBool = (self.getNumber() is not None)
     return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(resultBool, self.numberInfo.justification)], callJustification)
+
+  def __str__(self):
+    return str(self.numberInfo.value)
 
 
 
@@ -2028,11 +2068,11 @@ def suggestion():
 
     Var("solver", Call("makeSolver")),
 
-    Print(Str("Solutions:")),
-    Print(DotCall(DotGet(Get("solver"), "solutions"), "toString")),
+    #Print(Str("Solutions:")),
+    #Print(DotCall(DotGet(Get("solver"), "solutions"), "toString")),
     #Explain(DotCall(DotGet(Get("solver"), "solutions"), "__str__")),
     #Print(DotGet(Get("solver"), "solutions")),
-    Print(Str("done")),
+    #Print(Str("done")),
 
 
     #Print(Str("Relevant solutions:")),
@@ -2045,31 +2085,99 @@ def suggestion():
         SelfSet("universe", New("Universe")),
       ])
       .vars({"universe": "Universe"})
-      .func("talkOnce", ["input"], [
-        Var("justificationId", Int(Get("input"))),
-        Print(Str("")),
-        #Print(Str("responding")),
-
+      .func("showGenericHelp", [], [
+        Print(Str("""
+        Sorry; my English isn't yet very good. Here is what I can understand:
+        help  <keyword> - Ask me for usage of keyword <keyword>
+        solve <text>    - Ask me a question and I will try to help
+        y     <id>      - Ask me how I deduced statement number <id>
+        """))
+      ])
+      .func("showJustificationHelp", [], [
+         Print(Str("""
+         Some of my statements will have numbers in parentheses to the left, like this:
+         """)),
+         PrintWithId(Str("Tada!")),
+         Print(Str("""
+         If you type 'y <id>' then I will explain how I came to conclusion number <id>
+         """)),
+      ])
+      .func("showSolveHelp", [], [
+         Print(Str("""
+         Ask me a question and I might be able to solve it!
+         """))
+      ])
+      .func("showSarcasticHelpHelp", [], [
+         Print(Str("""
+         Really? You're asking for help with the 'help' keyword? Ok, here goes...
+         """)),
+         SelfCall("showHelpHelp"),
+      ])
+      .func("showHelpHelp", [], [
+         Print(Str("""
+         help <keyword> - Ask me for usage of keyword <keyword>
+         """)),
+      ])
+      .func("respondToHelp", ["components"], [
+        Var("keyword", DotCall(Get("components"), "tryGet", [Num(1)])),
+        If(DotCall(Str("help"), "equals", [Get("keyword")])).then([
+          SelfCall("showSarcasticHelpHelp")
+        ]).otherwise([
+          If(DotCall(Str("solve"), "equals", [Get("keyword")])).then([
+            SelfCall("showSolveHelp")
+          ]).otherwise([
+            If(DotCall(Str("y"), "equals", [Get("keyword")])).then([
+              SelfCall("showJustificationHelp")
+            ]).otherwise([
+              SelfCall("showGenericHelp"),
+            ])
+          ])
+        ])
+      ])
+      .func("respondToWhy", ["components"], [
+        #say why
+        Var("idText", DotCall(Get("components"), "tryGet", [Num(1)])),
+        Var("justificationId", Int(Get("idText"))),
         If(DotCall(Get("justificationId"), "nonEmpty")).then([
           ShortExplain(JustificationGetter(Get("justificationId")), Const(1)),
         ]).otherwise([
-          Var("problem1", New("Problem", [New("TextProposition", [Get("input")]), Bool(True)])),
-          Var("universe", SelfGet("universe")),
-          Print(Str("Relevant solutions:")),
-          Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
-          #Var("result", DotCall(DotCall(Get("solver"), "getRelevantDirectSolutions", [Get("problem1")]), "toString")),
-          #Var("result", DotCall(Get("problem1"), "equals", [Get("problem1")])),
-          Var("resultText", DotCall(Get("result"), "toString")),
-          #ShortExplain(DotCall(DotCall(Str("abc de f ghi jk lmn opqrstuv wx y z"), "split", [Str(" ")]), "toString"), Const(1)),
-          Print(Get("resultText")),
-          Print(Str("Because")),
-          ShortExplain(Get("result"), Const(1)),
+          SelfCall("showJustificationHelp")
         ]),
+      ])
+      .func("respondToSolve", ["components"], [
+        #help solve the user's external problem
+        Var("query", Str("Does X work?")),
+        Var("problem1", New("Problem", [New("TextProposition", [Get("query")]), Bool(True)])),
+        Var("universe", SelfGet("universe")),
+        Print(Str("Relevant solutions:")),
+        Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
+        Var("resultText", DotCall(Get("result"), "toString")),
+        PrintWithId(Get("resultText")),
+      ])
+      .func("talkOnce", ["input"], [
+        Print(Str("")),
+
+        Var("components", DotCall(Get("input"), "split", [Str(" ")])),
+        Var("component0", DotCall(Get("components"), "get", [Num(0)])),
+
+        If(DotCall(Str("y"), "equals", [Get("component0")])).then([
+          SelfCall("respondToWhy", [Get("components")])
+        ]).otherwise([
+          If(DotCall(Str("solve"), "equals", [Get("component0")])).then([
+            SelfCall("respondToSolve", [Get("components")])
+          ]).otherwise([
+            If(DotCall(Str("help"), "equals", [Get("component0")])).then([
+              SelfCall("respondToHelp", [Get("components")]),
+            ]).otherwise([
+              SelfCall("showGenericHelp"),
+            ])
+          ])
+        ])
       ])
       .func("communicate", [], [
         Print(Str("")),
         While(Bool(True), [
-          Var("response", Ask(Str("Say something!"))),
+          Var("response", Ask(Str("\nSay something!"))),
           DotCall(Get("self"), "talkOnce", [Get("response")]),
         ]),
       ]),
