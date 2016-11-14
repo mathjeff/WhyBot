@@ -1754,102 +1754,9 @@ def suggestion():
       #reject "As a..."
 
 
-    #class Solution, which has prerequisites, an activity, and a resulting change
-    #class Activity, which has an Actor, a verb, and a possibly something else, depending on which Activity it is
-    #For example:
-    #
-    #problem: "X"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"find", object: "a knowledgeable entity")
-    #  Action(actor:"you", verb:"adk", about:"the entity for help")
-    #  resulting change: "X is solved"
-    #
-    #problem: "X does not work"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"understand", object: "the problem")
-    #  Action(actor:"you", verb:"do", about:"the obvious")
-    #  resulting change: "X works"
-    #
-    #problem: "don't understand the problem"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"read", object: "clear logs")
-    #  Action(actor:"you", verb:"think", about:"the logs")
-    #  resulting change: "you understand the problem"
-    #
-    #problem: "don't understand the problem"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"found", object: "any logs")
-    #  Action(actor:"I", verb:"analyze", about:"the logs")
-    #  resulting change: "you understand the problem"
-    #
-    #problem: "don't understand the problem"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"have", object: "a version that works")
-    #  Action(actor:"you", verb:"diff", what:"the one that works with the onw that doesn't work")
-    #  resulting change: "you understand the problem"
-    #
-    #problem: "don't understand the problem"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"can", what: "wait")
-    #  Action(actor:"you", verb:"rest", until:"you feel better")
-    #  resulting change: "you understand the problem"
-    #
-    #problem: "don't understand the problem"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"can", what: "wait")
-    #  Action(actor:"you", verb:"rest", until:"the problem happens again")
-    #  resulting change: "you understand the problem"
-    #
-    #problem: "don't have clear logs"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"jave", object: "good source code")
-    #  Action(actor:"you", verb:"rerun", about:"the program")
-    #  resulting change: "you have clear logs"
-    #
-    #problem: "don't have good source code"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"understand", object: "the source code")
-    #  Action(actor:"you", verb:"improve", about:"the source code")
-    #  resulting change: "you have good source code"
-    #
-    #problem: "don't understand the source code"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"found", object: "the source code")
-    #  Action(actor:"you", verb:"read", about:"the source code")
-    #  resulting change: "you understand the source code"
-    #
-
-    #problem: "cannot find a knowledgeable entity"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"have", object: "an instance messenger")
-    #  Action(actor:"you", verb:"check", object:"the instant messenger's contact list")
-    #  resulting change: "found a knowledgeable entity"
-    #
-    #problem: "cannot find a knowledgeable entity"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"have", object: "internet access")
-    #  Action(actor:"you", verb:"use", object:"google.com as your knowledgeable entity")
-    #  resulting change: "found a knowledgeable entity"
-    #
-    #problem: "cannot find a knowledgeable entity"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"have", object: "internet access")
-    #  Action(actor:"you", verb:"check", object:"the company wiki")
-    #  resulting change: "found a knowledgeable entity"
-    #
-    #problem: "cannot find a knowledgeable entity"
-    #solution:
-    #  prerequisite: Action(actor:"you", verb:"have", object: "source code")
-    #  Action(actor:"you", verb:"execute", object:"git log ${filename}")
-    #  resulting change: "found a knowledgeable entity"
-    #
-
-
-
-
     #a thing that can be done
     Class("Action")
-      .func("execute", [], [
+      .func("offer", [], [
         AbstractException()
       ]),
 
@@ -1858,8 +1765,8 @@ def suggestion():
       .vars({"message": "string"})
       .init(["message"], [
       ])
-      .func("execute", [], [
-        Print(SelfGet("message")),
+      .func("offer", [], [
+        PrintWithId(SelfGet("message")),
       ])
       .func("toString", [], [
         Return(SelfGet("message"))
@@ -1898,37 +1805,38 @@ def suggestion():
         Return(SelfGet("text"))
       ]),
 
-
-    #a Predicate to be tested and a desired outcome for that predicate
-    Class("Problem")
-      .vars({"proposition":"Proposition", "desiredOutcome":"object"})
-      .init(["proposition", "desiredOutcome"], [
+    #a Proposition that says that two values are equal
+    Class("EqualProposition")
+      .inherit("Proposition")
+      .vars({"left":"Proposition", "right":"Proposition"}) 
+      .init(["left", "right"], [
       ])
-      .func("isSolved", ["universe"], [
-        Var("result", DotCall(SelfGet("proposition"), "evaluate")),
-        If(Eq(Get("result"), Bool(True))).then([
-          Return(Bool(True)),
-        ]).otherwise([
-          Return(Bool(False))
+      .func("evaluate", ["universe"], [
+        Return(Eq(
+            DotCall(SelfGet("left"), "evaluate", [Get("universe")]), 
+            DotCall(SelfGet("right"), "evaluate", [Get("universe")])
+        )),
+      ])
+      .func("equals", ["other"], [
+        Var("result", Bool(False)),
+        If(DotCall(SelfGet("left"), "equals", [DotGet(Get("other"), "left")])).then([
+          If(DotCall(SelfGet("right"), "equals", [DotGet(Get("other"), "right")])).then([
+            Set("result", Bool(True)), #we could do fancy more-accurate things like checking for inverted checks with inverted outcomes, but we're not doing that for now
+          ])
         ]),
-      ])
-      .func("equals", ["problem"], [
-        Var("sameCheck", DotCall(SelfGet("proposition"), "equals", [DotGet(Get("problem"), "proposition")])),
-        #If(Eq(Get("sameCheck"), Bool(True))).then([
-        If(Get("sameCheck")).then([
-          Var("sameOutcome", DotCall(SelfGet("desiredOutcome"), "equals", [DotGet(Get("problem"), "desiredOutcome")])),
-          Return(Get("sameOutcome")), #we could do fancy more-accurate things like checking for inverted checks with inverted outcomes, but we're not doing that for now
-        ]).otherwise([
-          Return(Bool(False)),
-        ])
+        Return(Get("result"))
       ])
       .func("toString", [], [
-        Return(DotCall(SelfGet("proposition"), "toString")),
+        Return(Concat([
+          DotCall(SelfGet("left"), "toString"),
+          Str(" == "),
+          DotCall(SelfGet("right"), "toString"),
+        ]))
       ]),
 
-    #a problem to be solved, a way to solve it, and a prerequisite to being able to solve it
+    #a problem (Proposition whose value the user wants to be True) to be solved, a way to solve it (an Action to do), and a prerequisite (a Proposition whose value could be True) required before being able to solve it
     Class("Solution")
-      .vars({"problem":"Problem", "prerequisite":"Proposition", "fix":"Action"})
+      .vars({"problem":"Proposition", "prerequisite":"Proposition", "fix":"Action"})
       .init(["problem", "prerequisite", "fix"], [      
       ])
       .func("toString", [], [
@@ -1941,6 +1849,10 @@ def suggestion():
           DotCall(SelfGet("problem"), "toString"),
           Str('" should be all set.'),
         ]))
+      ])
+      .func("offer", [], [
+        Print(Concat([Str("If you can solve "), DotCall(SelfGet("prerequisite"), "toString")])),
+        DotCall(SelfGet("fix"), "offer"),
       ]),
 
     #searches a list of solutions for a relevant solution
@@ -1950,17 +1862,11 @@ def suggestion():
         SelfSet("solutions", New("List")),
       ])
       .func("addSolution", ["solution"], [
-        #DotCall(SelfGet("solutions"), "append", [Get("solution")]),
-        DotCall(SelfGet("solutions"), "append", [Get("solution")]), #just for testing
+        DotCall(SelfGet("solutions"), "append", [Get("solution")]),
       ])
       .func("trySolve", ["problem", "universe"], [
         Var("solutions", SelfCall("getDoableSolutions", [Get("problem"), Get("universe")])),
-        Var("messages", New("List")),
-        ForEach("solution", Get("solutions"), [
-          DotCall(Get("messages"), "append", [Concat([DotCall(Get("solution"), "toString"), Str("\n")])])
-        ]),
-        #Return(SelfCall("getDoableSolutions", [Get("problem"), Get("universe")]))
-        Return(Get("messages"))
+        Return(Get("solutions")),
       ])
       .func("getRelevantDirectSolutions", ["problem"], [
         Var("relevantSolutions", New("List")),
@@ -2000,26 +1906,26 @@ def suggestion():
       Var("solver", New("Solver")),
 
       #prerequisites of solutions
-      Var("doesXWork", New("TextProposition", [Str("Does X work?")])),
-      Var("didYouFindHelp", New("TextProposition", [Str("Can you find a knowledgeable entity for this topic?")])),
-      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("Do you understand the problem?")])),
-      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("Did you find logs that are sufficiently helpful?")])),
-      Var("canYouFindAnyLogs", New("TextProposition", [Str("Did you find any logs?")])),
-      Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Can you find a version that works?")])),
-      Var("canYouAffordToWait", New("TextProposition", [Str("Can you afford to wait?")])),
-      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("Do you have easy-to-understand source code?")])),
-      Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Do you have any source code?")])),
-      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("Do you understand the source code?")])),
-      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Do you have an instant messenger?")])),
-      Var("doYouHaveInternet", New("TextProposition", [Str("Do you have internet access?")])),
+      Var("doesXWork", New("TextProposition", [Str("It works")])),
+      Var("didYouFindHelp", New("TextProposition", [Str("Find a knowledgeable entity")])),
+      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("Understand the problem")])),
+      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("Find helpful logs")])),
+      Var("canYouFindAnyLogs", New("TextProposition", [Str("Find logs")])),
+      Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Find a version that works")])),
+      Var("canYouAffordToWait", New("TextProposition", [Str("Afford to wait")])),
+      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("Have clear code")])),
+      Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Have any code")])),
+      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("Understand the code")])),
+      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Have an instant messenger")])),
+      Var("doYouHaveInternet", New("TextProposition", [Str("Have internet access")])),
       
       #problems (propositions with desired values)
-      Var("xWorks", New("Problem", [Get("doesXWork"), Bool(True)])),
-      Var("youDidFindHelp", New("Problem", [Get("didYouFindHelp"), Bool(True)])),
-      Var("youDoUnderstandTheProblem", New("Problem", [Get("doYouUnderstandTheProblem"), Bool(True)])),
-      Var("youDidFindHelpfulLogs", New("Problem", [Get("didYouFindHelpfulLogs"), Bool(True)])),
-      Var("youDoHaveGoodSourceCode", New("Problem", [Get("doYouHaveGoodSourceCode"), Bool(True)])),
-      Var("youDoUnderstandTheSourceCode", New("Problem", [Get("doYouUnderstandTheSourceCode"), Bool(True)])),
+      Var("xWorks", New("EqualProposition", [Get("doesXWork"), Bool(True)])),
+      Var("youDidFindHelp", New("EqualProposition", [Get("didYouFindHelp"), Bool(True)])),
+      Var("youDoUnderstandTheProblem", New("EqualProposition", [Get("doYouUnderstandTheProblem"), Bool(True)])),
+      Var("youDidFindHelpfulLogs", New("EqualProposition", [Get("didYouFindHelpfulLogs"), Bool(True)])),
+      Var("youDoHaveGoodSourceCode", New("EqualProposition", [Get("doYouHaveGoodSourceCode"), Bool(True)])),
+      Var("youDoUnderstandTheSourceCode", New("EqualProposition", [Get("doYouUnderstandTheSourceCode"), Bool(True)])),
 
       #fixes
       Var("askForHelp", New("TextAction", [Str("Ask the knowledgeable entity for help.")])),
@@ -2165,12 +2071,15 @@ def suggestion():
       ])
       .func("respondToSolve", ["queryText"], [
         #help solve the user's external problem
-        Var("problem1", New("Problem", [New("TextProposition", [Get("queryText")]), Bool(True)])),
+        Var("problem1", New("EqualProposition", [New("TextProposition", [Get("queryText")]), Bool(True)])),
         Var("universe", SelfGet("universe")),
-        Print(Str("Relevant solutions:")),
-        Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
-        Var("resultText", DotCall(Get("result"), "toString")),
-        PrintWithId(Get("resultText")),
+        Print(Str("Possible solutions:")),
+        Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
+        Print(Str("")),
+        ForEach("solution", Get("solutions"), [
+          DotCall(Get("solution"), "offer"),
+          Print(Str("")),
+        ])
       ])
       .func("talkOnce", ["input"], [
         Print(Str("")),
