@@ -1,3 +1,4 @@
+print("Initializing...")
 # Sorry about writing this program in Python instead of a language supporting static typing such as C#, Java or Groovy
 # I wanted this program to be trivially easy to download, run, edit, and rerun, rather than just fairly easy
 # Hopefully I'll rewrite this program in another language eventually
@@ -109,6 +110,7 @@ class Program(object):
         NativeMethodDefinition("split", ["separator"]),
         NativeMethodDefinition("toString", []),
         NativeMethodDefinition("plus", ["other"]),
+        NativeMethodDefinition("exceptPrefix", ["other"]),
         NativeMethodDefinition("equals", ["other"]),
       ]),
       NativeClassDefinition("List", (lambda why: ListWrapper(why)), [
@@ -271,6 +273,11 @@ class Scope(object):
 
     justification = AndJustification("newObject " + str(className) + "(" + ", ".join([str(info.value) for info in justifiedArguments]) + ")",  [callJustification] + [info.justification for info in justifiedArguments])
     return JustifiedValue(newObject, justification)
+
+  def newBoringObject(self, className, justifiedArguments, callJustification):
+    resultInfo = self.newObject(className, justifiedArguments, callJustification)
+    resultInfo.justification.interesting = False
+    return resultInfo
 
   def newManagedObject(self, classDefinition, justifiedArguments, callJustification):
     newObject = self.newChild()
@@ -1523,8 +1530,7 @@ class ListWrapper(NativeObject):
     result =  "[" + ", ".join([obj.getText() for obj in textObjects]) + "]"
     justificationText  =  "Returned List.toString() = " + result
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
-    resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
-    resultInfo.justification.interesting = False #the user won't be interested in the fact that we're creating a String object here; they're be interested in the components that went into it
+    resultInfo = self.managedObject.execution.getScope().newBoringObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
     return resultInfo
 
   def __str__(self):
@@ -1577,6 +1583,18 @@ class StringWrapper(NativeObject):
       comparison = "!="
     justification = AndJustification(str(ourValue) + str(comparison) + str(theirValue), [self.textInfo.justification, other.textInfo.justification])
     return self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
+
+  def exceptPrefix(self, callJustification, prefixInfo):
+    ourText = self.getText()
+    prefix = prefixInfo.value
+    prefixText = prefix.getText()
+    if ourText.startswith(prefixText):
+      resultText = ourText[len(prefixText):]
+      justification = TextJustification("'" + str(ourText) + "' starts with '" + str(prefixText) + "'")
+    else:
+      resultText = ourText
+      justification = TextJustification("'" + str(ourText) + "' does not start with '" + str(prefixText) + "'")
+    return self.execution.getScope().newBoringObject("String", [JustifiedValue(resultText, justification)], callJustification)
 
   def getText(self):
     return self.textInfo.value
@@ -1949,8 +1967,6 @@ def suggestion():
         ForEach("candidateSolution", SelfGet("solutions"), [
           If(DotCall(DotGet(Get("candidateSolution"), "problem"), "equals", [Get("problem")])).then([
             DotCall(Get("relevantSolutions"), "append", [Get("candidateSolution")])
-          ]).otherwise([
-            #ShortExplain(Get("problem"), Const(1))
           ]),
         ]),
         Return(Get("relevantSolutions"))
@@ -2087,7 +2103,6 @@ def suggestion():
       .vars({"universe": "Universe"})
       .func("showGenericHelp", [], [
         Print(Str("""
-        Sorry; my English isn't yet very good. Here is what I can understand:
         help  <keyword> - Ask me for usage of keyword <keyword>
         solve <text>    - Ask me a question and I will try to help
         y     <id>      - Ask me how I deduced statement number <id>
@@ -2109,17 +2124,18 @@ def suggestion():
       ])
       .func("showSarcasticHelpHelp", [], [
          Print(Str("""
-         Really? You're asking for help with the 'help' keyword? Ok, here goes...
+         Really? You're asking for help with the 'help' keyword? Ok. Here goes:
          """)),
          SelfCall("showHelpHelp"),
       ])
       .func("showHelpHelp", [], [
          Print(Str("""
+         help           - Ask me for a list of statements and brief usage instructions for each
          help <keyword> - Ask me for usage of keyword <keyword>
          """)),
       ])
-      .func("respondToHelp", ["components"], [
-        Var("keyword", DotCall(Get("components"), "tryGet", [Num(1)])),
+      .func("respondToHelp", ["text"], [
+        Var("keyword", Get("text")),
         If(DotCall(Str("help"), "equals", [Get("keyword")])).then([
           SelfCall("showSarcasticHelpHelp")
         ]).otherwise([
@@ -2129,14 +2145,17 @@ def suggestion():
             If(DotCall(Str("y"), "equals", [Get("keyword")])).then([
               SelfCall("showJustificationHelp")
             ]).otherwise([
+              If(DotCall(Str(None), "equals", [Get("keyword")])).then([
+              ]).otherwise([
+                Print(Str("""Sorry; I don't recognize that keyword. Here is what I can understand:"""))
+              ]),
               SelfCall("showGenericHelp"),
             ])
           ])
         ])
       ])
-      .func("respondToWhy", ["components"], [
+      .func("respondToWhy", ["idText"], [
         #say why
-        Var("idText", DotCall(Get("components"), "tryGet", [Num(1)])),
         Var("justificationId", Int(Get("idText"))),
         If(DotCall(Get("justificationId"), "nonEmpty")).then([
           ShortExplain(JustificationGetter(Get("justificationId")), Const(1)),
@@ -2144,10 +2163,9 @@ def suggestion():
           SelfCall("showJustificationHelp")
         ]),
       ])
-      .func("respondToSolve", ["components"], [
+      .func("respondToSolve", ["queryText"], [
         #help solve the user's external problem
-        Var("query", Str("Does X work?")),
-        Var("problem1", New("Problem", [New("TextProposition", [Get("query")]), Bool(True)])),
+        Var("problem1", New("Problem", [New("TextProposition", [Get("queryText")]), Bool(True)])),
         Var("universe", SelfGet("universe")),
         Print(Str("Relevant solutions:")),
         Var("result", DotCall(DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")]), "toString")),
@@ -2159,16 +2177,18 @@ def suggestion():
 
         Var("components", DotCall(Get("input"), "split", [Str(" ")])),
         Var("component0", DotCall(Get("components"), "get", [Num(0)])),
+        Var("argumentText", DotCall(Get("input"), "exceptPrefix", [Concat([Get("component0"), Str(" ")])])),
 
         If(DotCall(Str("y"), "equals", [Get("component0")])).then([
-          SelfCall("respondToWhy", [Get("components")])
+          SelfCall("respondToWhy", [Get("argumentText")])
         ]).otherwise([
           If(DotCall(Str("solve"), "equals", [Get("component0")])).then([
-            SelfCall("respondToSolve", [Get("components")])
+            SelfCall("respondToSolve", [Get("argumentText")])
           ]).otherwise([
             If(DotCall(Str("help"), "equals", [Get("component0")])).then([
-              SelfCall("respondToHelp", [Get("components")]),
+              SelfCall("respondToHelp", [Get("argumentText")]),
             ]).otherwise([
+              Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
               SelfCall("showGenericHelp"),
             ])
           ])
