@@ -7,6 +7,66 @@ import subprocess
 import traceback
 import sys
 
+
+
+#############################################################################################################################################################################################
+#For determining where in this file (jeffry.gaston.py) we are
+#Has to be at the top of this file because it needs to be able to ignore itself when giving line numbers
+
+class ExternalStackInfo(object):
+  def __init__(self):
+    self.ignoredLineNumbers = set()
+
+  def ignoreCurrentlyActiveLines(self):
+    #make a note of the current stack to enable ignoring any lines currently active (which just participate in this custom interpreter and aren't part of the program being defined)
+    lineNumbers = self.extract_lineNumbers()
+    for lineNumber in lineNumbers:
+      self.ignoreLineNumber(lineNumber)
+
+  def ignoreRange(self, minInclusive, maxInclusive):
+    for lineNumber in range(minInclusive, maxInclusive):
+      self.ignoreLineNumber(lineNumber)
+
+  def ignoreLineNumber(self, lineNumber):
+    if lineNumber not in self.ignoredLineNumbers:
+      self.ignoredLineNumbers.add(lineNumber)
+    
+  def get_root_relevantLineNumber(self):
+    #Return the line in the call stack closest to the root, excluding ignored lines
+    #Generally only relevant if statements are being added to the Program
+    for entry in self.extractStack():
+      candidate = self.extract_lineNumber(entry)
+      if candidate not in self.ignoredLineNumbers:
+        return candidate
+    raise Exception("Failed to identify interesting line number for stack " + str(stack))
+
+  def get_leaf_relevantLineNumber(self):
+    #Return the number of the line closest to the leaf, excluding ignored lines
+    stack = self.extractStack()
+    for entry in reversed(stack):
+      candidate = self.extract_lineNumber(entry)
+      if candidate not in self.ignoredLineNumbers:
+        return candidate
+    raise Exception("Failed to identify interesting line number for stack " + str(stack))
+
+
+  def extractStack(self):
+    return traceback.extract_stack()
+
+  def extract_lineNumbers(self):
+    stack = self.extractStack()
+    lineNumbers = [self.extract_lineNumber(line) for line in stack]
+    return lineNumbers
+
+  def extract_lineNumber(self, entry):
+    return entry[1]
+
+externalStackInfo = ExternalStackInfo()
+
+#we're not interested in including earlier numbers in the stack trace
+externalStackInfo.ignoreRange(0, externalStackInfo.get_root_relevantLineNumber())
+
+
 #############################################################################################################################################################################################
 #miscellaneous utils
 class ShellScript(object):
@@ -76,52 +136,13 @@ stringUtils = StringUtils()
 
 
 #############################################################################################################################################################################################
-#for determining where in this file (jeffry.gaston.py) we are
-
-programLineStart = None
-
-class ExternalStackInfo(object):
-  def __init__(self):
-    self.ignoredLineNumbers = []
-
-  def setup(self):
-    #make a note of the current stack to enable ignoring any lines currently active (which just participate in this custom interpreter and aren't part of the program being defined)
-    lineNumbers = self.extract_lineNumbers()
-    self.ignoredLineNumbers = lineNumbers
-    
-  def getCurrentLineNumber(self):
-    ignoredLineNumber = None
-    #Return the number of the line of source code in this file that defines the line currently being added to the Program
-    #Only relevant if statements are being added to the Program
-    for entry in self.extractStack():
-      candidate = self.extract_lineNumber(entry)
-      if candidate not in self.ignoredLineNumbers:
-        return candidate
-      else:
-        ignoredLineNumber = candidate
-    raise Exception("Failed to identify line number")
-
-  def extractStack(self):
-    return traceback.extract_stack()
-
-  def extract_lineNumbers(self):
-    stack = self.extractStack()
-    lineNumbers = [self.extract_lineNumber(line) for line in stack]
-    return lineNumbers
-
-  def extract_lineNumber(self, entry):
-    return entry[1]
-
-externalStackInfo = ExternalStackInfo()
-
-#############################################################################################################################################################################################
 #program statements
 
 
 #a program
 class Program(object):
   def __init__(self):
-    externalStackInfo.setup()
+    externalStackInfo.ignoreCurrentlyActiveLines()
     self.statements = []
     self.nativeClasses = [
       NativeClassDefinition("String", (lambda why, text: StringWrapper(why, text)), [
@@ -373,17 +394,26 @@ class Execution(object):
     self.scopes = [self.rootScope]
     self.statements = [statement for statement in program.statements]
     self.declareNativeClasses(program.nativeClasses)
+    self.callStack = [None]
 
   def run(self):
     return self.runStatements(self.statements)
 
-  def runStatements(self, statements):
+  def runStatements(self, statements, callJustification=None):
     result = None
     for statement in statements:
       self.ownStatement(statement)
+    self.callStack.append(None)
     for statement in statements:
-      justification = TextJustification(str(statement) + " is in my program")
+      if callJustification is not None:
+        justification = callJustification
+      else:
+        justification = TextJustification(str(statement) + " is in my program")
+      self.callStack[-1] = statement.lineNumber
       result = statement.process(justification)
+      if result is not None:
+        result.justification.logicLocation = self.callStack[-1]
+    del self.callStack[-1]
     return result
 
   def ownStatement(self, statement):
@@ -412,7 +442,7 @@ class Execution(object):
       self.declareNativeClass(nativeClassDefinition)
 
   def declareNativeClass(self, nativeClassDefinition):
-    externalStackInfo.setup()
+    externalStackInfo.ignoreCurrentlyActiveLines()
     foundInScope = self.getScope()
     managedClassName = nativeClassDefinition.managedClassName
 
@@ -470,7 +500,7 @@ class LogicStatement(object):
     self.execution = None
     self.children = []
     self.definitionScope = None
-    self.lineNumber = externalStackInfo.getCurrentLineNumber()
+    self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
     
   def beOwned(self, execution):
     self.execution = execution
@@ -511,14 +541,12 @@ class If(LogicStatement):
 
   def process(self, callJustification):
     result = self.condition.process(callJustification)
-    description = str(self) + " was evaluated as " + str(result.value)
-    childJustification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
+    #childJustification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
+    childJustification = result.justification
     if result.value.isTrue():
-      for trueEffect in self.trueEffects:
-        trueEffect.process(childJustification)
+      self.execution.runStatements(self.trueEffects, childJustification)
     else:
-      for falseEffect in self.falseEffects:
-        falseEffect.process(childJustification)
+      self.execution.runStatements(self.falseEffects, childJustification)
 
   def __str__(self):
     return str(self.condition)
@@ -532,6 +560,7 @@ class ForEach(LogicStatement):
     self.children.append(valuesProvider)
     self.children += statements
     self.statements = statements
+    self.lineNumber = self.valuesProvider.lineNumber #show the line number of the top of the loop, rather than the line number of the bottom of the loop
 
   def process(self, callJustification):
     loopScope = self.execution.getScope().newChild("for loop of " + str(self.variableName))
@@ -542,15 +571,14 @@ class ForEach(LogicStatement):
     values = valueInfos.value
     for valueInfo in values.impl:
       value = valueInfo.value
-      justification = FullJustification(str(self.variableName), value, self.lineNumber, callJustification, [valuesJustification, valueInfo.justification])
+      justification = FullJustification("loop iterator " + str(self.variableName), value, self.lineNumber, callJustification, [valuesJustification, valueInfo.justification])
 
       loopScope.setInfo(self.variableName, JustifiedValue(value, justification))
 
       iterationScope = self.execution.getScope().newChild("iteration where " + str(self.variableName) + " = " + str(value))
       self.execution.addScope(iterationScope)
 
-      for statement in self.statements:
-        statement.process(justification)
+      self.execution.runStatements(self.statements, justification)
 
       self.execution.removeScope()
 
@@ -582,8 +610,7 @@ class While(LogicStatement):
 
       justification = FullJustification(str(self.condition), conditionInfo.value, self.lineNumber, callJustification, [conditionInfo.justification])
 
-      for statement in self.statements:
-        statement.process(justification)
+      self.execution.runStatements(self.statements, justification)
 
       self.execution.removeScope()
 
@@ -683,6 +710,7 @@ class Call(LogicStatement):
 justificationId = 0
 justificationsById = []
 
+justification_startLine = externalStackInfo.get_root_relevantLineNumber()
 #class telling why something happened
 class Justification(object):
   def __init__(self):
@@ -692,6 +720,7 @@ class Justification(object):
     justificationId += 1
     justificationsById.append(self)
     self.interesting = True
+    self.implementationLocation = externalStackInfo.get_leaf_relevantLineNumber()
 
   def addSupporter(self, supporter):
     if not isinstance(supporter, Justification):
@@ -781,6 +810,7 @@ class UnknownJustification(TextJustification):
 
 #justification of something caused by other things	
 class AndJustification(Justification):
+
   def __init__(self, description, justifications):
     super(AndJustification, self).__init__()
     self.description = description
@@ -788,9 +818,12 @@ class AndJustification(Justification):
       self.addSupporter(justification)
     if "__main__" in description:
       logger.fail("Invalid description (probably invalid class) passed to AndJustification: " + description, self)
+    self.logicLocation = None
 
   def describe(self):
-    return str(self.description)
+    description = "[lines " + str(self.implementationLocation) + "/" + str(self.logicLocation) + "]: "
+    description += str(self.description)
+    return description
 
   
 #says that two things are equal
@@ -824,7 +857,7 @@ class FullJustification(Justification):
   def describe(self):
     message = ""
     #if self.logicLocation is not None:
-    message += "[line " + str(self.logicLocation) + "]: "
+    message += "[lines " + str(self.implementationLocation) + "/" + str(self.logicLocation) + "]: "
     message += stringUtils.toVariableText(self.variableName) + " = " + str(self.value)
     return message
 
@@ -875,6 +908,9 @@ class FullJustification(Justification):
     return description
 
 
+justification_endLine = externalStackInfo.get_root_relevantLineNumber()
+#we're not interested in listing line numbers for the code of the Justification class, but we will be interested in listing line numbers for code that creates a Justification instance
+externalStackInfo.ignoreRange(justification_startLine, justification_endLine)
 
 #contains a value and a justification
 class JustifiedValue(object):
@@ -899,7 +935,7 @@ class JustifiedValue(object):
 class ValueProvider(object):
   def __init__(self):
     self.execution = None
-    self.lineNumber = externalStackInfo.getCurrentLineNumber()
+    self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
     
   def beOwned(self, execution):
     self.execution = execution
@@ -1446,12 +1482,9 @@ class DotCallImpl(LogicStatement):
     selfJustification = argumentInfos[0].justification
     numNonSelfParameters = len(argumentInfos) - 1
     text = "Evaluated " + str(self)
-    #argumentJustification = AndJustification(text, argumentJustifications)
-    #overallJustification = AndJustification(text, [callJustification, selfJustification, argumentJustification])
-    #overallJustification = FullJustification(str(self), "result", self.lineNumber, callJustification, [selfJustification, argumentJustification])
-    contextJustification = AndJustification("[line " + str(self.lineNumber) + "]: " + text, [callJustification, selfJustification] + argumentJustifications)
+    contextJustification = AndJustification(text, [callJustification, selfJustification] + argumentJustifications)
+    contextJustification.logicLocation = self.lineNumber
     f = classScope.getFunction(self.methodName, contextJustification)
-    #result = self.execution.getScope().callFunction(f, argumentInfos, overallJustification)
     result = self.execution.getScope().callFunction(f, argumentInfos, contextJustification)
     justification = FullJustification(str(self), result.value, self.lineNumber, callJustification, [result.justification])
     return JustifiedValue(result.value, justification)
@@ -1578,7 +1611,9 @@ class ListWrapper(NativeObject):
   def append(self, callJustification, item):
     if not isinstance(item, JustifiedValue):
       logger.fail("Invalid item " + str(item) + " (not a subclass of JustifiedValue) appended to " + str(self), callJustification)
-    self.impl.append(JustifiedValue(item.value, AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])))
+    justification = AndJustification("appended " + str(item.value) + " to " + str(self.impl), [callJustification, item.justification])
+    justification.logicLocation = callJustification.logicLocation
+    self.impl.append(JustifiedValue(item.value, justification))
     return JustifiedValue(None, callJustification)
 
   def get(self, callJustification, indexInfo):
@@ -1626,9 +1661,6 @@ class ListWrapper(NativeObject):
     elementsJustification = AndJustification(justificationText, [callJustification] + allJustifications)
     resultInfo = self.managedObject.execution.getScope().newBoringObject("String", [JustifiedValue(result, elementsJustification)], callJustification)
     return resultInfo
-
-  def __str__(self):
-    return "ListWrapper"
 
 class StringWrapper(NativeObject):
   def __init__(self, callJustification, textInfo):
@@ -2008,6 +2040,7 @@ def suggestion():
               #found a solution for which the prerequisites are not met
               Var("childSolutions", SelfCall("getDoableSolutions", [Get("prereq"), Get("universe")])),
               ForEach("childSolution", Get("childSolutions"), [
+                AbstractException(),
                 DotCall(Get("doableSolutions"), "append", [Get("childSolution")]),
               ])
             ]),
@@ -2193,10 +2226,10 @@ def suggestion():
       .inherit("TextQuestion")
       .vars({"communicator":"Communicator"})
       .init(["communicator"], [
-        SuperCall("__init__", [Str("What is your name?")]),
+        SuperCall("__init__", [Str("username: ")]),
       ])
       .func("done", [], [
-        Print(Concat([Str("Hi "), SelfGet("responseText")])),
+        Print(Concat([Str("Hi, "), SelfGet("responseText")])),
         DotCall(SelfGet("communicator"), "setUsername", [SelfGet("responseText")]),
       ]),
 
@@ -2302,12 +2335,12 @@ def suggestion():
         Print(Str("Possible solutions:")),
         Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
         If(DotCall(Num(0), "equals", [DotCall(Get("solutions"), "getLength")])).then([
-          Print(Str("Sorry, I don't have any solutions to that problem. Here are the problems that I know how to solve")),
+          Print(Str("Sorry, I don't have any solutions to that problem. Here are the problems that I know how to solve:")),
           ForEach("solution", DotGet(SelfGet("solver"), "solutions"), [
             Print(DotCall(DotGet(Get("solution"), "problem"), "toString")),
           ]),
         ]).otherwise([
-         Print(Str("")),
+          Print(Str("")),
           ForEach("solution", Get("solutions"), [
             DotCall(Get("solution"), "offer"),
             Print(Str("")),
@@ -2350,11 +2383,12 @@ def suggestion():
                 If(DotCall(Str("help"), "equals", [Get("component0")])).then([
                   SelfCall("respondToHelp", [Get("argumentText")]),
                 ]).otherwise([
-                  Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
-                  SelfCall("showGenericHelp"),
+                  #Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
+                  #SelfCall("showGenericHelp"),
                   If(Not(DotCall(SelfGet("question"), "isSatisfied"))).then([
-                    Print(Str("If you're answering my question, you have to prefix your entry with 'ans ' so I can be sure that that's what you mean")),
-                    Print(Str("")),
+                    #Print(Str("If you're answering my question, you have to prefix your entry with 'ans ' so I can be sure that that's what you mean")),
+                    #Print(Str("")),
+                    Print(Concat([Str("Try 'ans "), Get("input"), Str("' to answer my question ('"), DotCall(SelfGet("question"), "getQueryText"), Str("') or type 'help' for help")])),
                   ])
                 ])
               ])
@@ -2366,9 +2400,10 @@ def suggestion():
         Var("prompt", Const(None)),
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
           If(DotCall(Str(""), "equals", [SelfGet("username")])).then([
-            Set("prompt", Str("Say something!")),
+            Set("prompt", Str("whybot $ ")),
           ]).otherwise([
-            Set("prompt", Concat([Str("Say something, "), SelfGet("username"), Str("!")])),
+            #this doesn't have much direct function other than being cute
+            Set("prompt", Concat([SelfGet("username"), Str("@"), Str("whybot $ ")]))
           ])
         ]).otherwise([
           Set("prompt", DotCall(SelfGet("question"), "getQueryText")),
