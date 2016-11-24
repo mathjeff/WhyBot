@@ -8,7 +8,7 @@ import traceback
 import sys
 
 
-print("...")
+print("Loading 0/3...")
 
 #############################################################################################################################################################################################
 #For determining where in this file (jeffry.gaston.py) we are
@@ -44,6 +44,7 @@ class ExternalStackInfo(object):
 
   def get_leaf_relevantLineNumber(self):
     #Return the number of the line closest to the leaf, excluding ignored lines
+    #Generall relevant while the Program is executing
     stack = self.extractStack()
     for entry in reversed(stack):
       candidate = self.extract_lineNumber(entry)
@@ -267,15 +268,10 @@ class Scope(object):
       argumentName = f.argumentNames[i]
       child.declareInfo(argumentName, info)
     result = None
+    calledChild_justification = AndJustification("called " + str(f.functionName), [callJustification])
+    calledChild_justification.logicLocation = f.lineNumber
     #run all the statements in the function
-    for statement in f.statements:
-      try:
-        success = False
-        statement.process(callJustification)
-        success = True;
-      finally:
-        if not success:
-          logger.message("Exception on line " + str(statement.lineNumber))
+    self.execution.runStatements(f.statements, calledChild_justification)
     self.execution.removeScope()
     result = child.tryGetInfo("return") #not sure yet whether using a variable named 'return' is a hack or a feature but it's weird
     if result is not None:
@@ -349,7 +345,10 @@ class Scope(object):
     return newObject
 
   def newNativeObject(self, classDefinition, justifiedArguments, callJustification):
-    newObject = functionUtils.unwrapAndCall(classDefinition.constructor, [callJustification] + [info for info in justifiedArguments])
+    try:
+      newObject = functionUtils.unwrapAndCall(classDefinition.constructor, [callJustification] + justifiedArguments)
+    except Exception as e:
+      logger.fail("failed to create " + str(classDefinition) + " with args " + str([info.value for info in justifiedArguments]), AndJustification(str(e), [callJustification]))
     self.attachClassDefinition(newObject, classDefinition)
     newObject.execution = self.execution
     return newObject
@@ -467,6 +466,7 @@ class Execution(object):
         FunctionDefinition(
           methodDefinition.methodName,
           ["self"] + methodDefinition.argumentNames,
+          None,
           [nativeStatement]
         ),
         TextJustification(str(methodDefinition.methodName) + " is a built-in method")
@@ -495,6 +495,9 @@ class Execution(object):
     self.addScope(implementedInScope)
     self.runStatements(classDefinition.methodDefiners)
     self.removeScope()
+
+  def putLineNumber(self, justification):
+    justification.logicLocation = self.callStack[-1]
 
 #classes relating to programming
 class LogicStatement(object):
@@ -589,6 +592,13 @@ class ForEach(LogicStatement):
   def __str__(self):
     return "for " + str(self.variableName) + " in " + str(self.valuesProvider)
 
+#a 'for'
+class For(ForEach):
+  def __init__(self, variableName, lowProvider, highProvider, statements):
+    valuesProvider = Range(lowProvider, highProvider)
+    super(For, self).__init__(variableName, valuesProvider, statements)
+
+
 #a 'while'
 class While(LogicStatement):
   def __init__(self, condition, statements):
@@ -655,18 +665,18 @@ class Return(Var):
     super(Return, self).__init__("return", valueProvider) #a hack for now
 
 class FunctionDefinition(object):
-  def __init__(self, functionName, argumentNames, statements):
+  def __init__(self, functionName, argumentNames, lineNumber, statements):
     self.functionName = functionName
     self.argumentNames = argumentNames
     self.statements = statements
-
-
+    self.lineNumber = lineNumber
+    
   def __str__(self):
     return self.functionName
 
 #a function definition
 class Func(LogicStatement):
-  def __init__(self, functionName, argumentNames, statements):
+  def __init__(self, functionName, argumentNames, statements=[]):
     super(Func, self).__init__()
     self.functionName = functionName
     if not isinstance(argumentNames, list):
@@ -674,9 +684,14 @@ class Func(LogicStatement):
     self.argumentNames = argumentNames
     self.statements = statements
     self.children += statements
+    self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
 
   def process(self, justification):
-    self.execution.getScope().declareFunction(FunctionDefinition(self.functionName, self.argumentNames, self.statements), justification)
+    self.execution.getScope().declareFunction(FunctionDefinition(self.functionName, self.argumentNames, self.lineNumber, self.statements), justification)
+
+  def then(self, statements):
+    self.statements += statements
+    return self
 
   def __str__(self):
     return "def " + str(self.functionName)
@@ -1304,7 +1319,7 @@ class Class(LogicStatement):
     f = Func(methodName, ["self"] + argumentNames, statements)
     self.methodDefiners.append(f)
     self.children.append(f)
-    return self #to enable the caller to call 'when' and put a function body
+    return self #to enable the caller to declare another function
 
   def init(self, argumentNames, statements):
     #If any init arguments match declared variable names, then copy them automatically. Isn't it cool inventing a new language and being able to add this kind of thing?
@@ -1356,6 +1371,25 @@ class Num(New):
   def __init__(self, value):
     super(Num, self).__init__("Num", [Const(value)])
 
+class Range(ValueProvider):
+  def __init__(self, arg1Provider, arg2Provider=None):
+    if arg2Provider is not None:
+      self.highProvider = arg2Provider
+      self.lowProvider = arg1Provider
+    else:
+      self.highProvider = arg1Provider
+      self.lowProvider = Num(0)
+    super(Range, self).__init__()
+	  
+  def process(self, callJustification):
+    lowInfo = self.lowProvider.process(callJustification)
+    highInfo = self.highProvider.process(callJustification)
+    result = range(lowInfo.value, highInfo.value)
+    return JustifiedValue(result, AndJustification(str(self) + " = " + str(result), [lowInfo.justification, highInfo.justification]))
+  
+  def __str__(self):
+    return "range(" + str(self.lowProvider) + "," + str(self.highProvider) + ")"
+	
 #sets a property of an object - nearly the same as Set
 class DotSet(LogicStatement):
   def __init__(self, ownerProvider, propertyName, valueProvider):
@@ -1564,7 +1598,10 @@ class NativeSelfCall(LogicStatement):
     historyJustification = AndJustification("Called (unmanaged) " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", [callJustification, selfJustification] + [argumentsJustification])
     historyJustification.interesting = False #we don't expect the user to be interested in knowing that we made an unmanaged call to implement their code
     args = [historyJustification] + [info for info in argumentInfos]
-    result = functionUtils.unwrapAndCall(nativeMethod, args)
+    try:
+      result = functionUtils.unwrapAndCall(nativeMethod, args)
+    except Exception as e:
+      logger.fail(str(self) + " failed", AndJustification(str(e), [callJustification, argumentsJustification]))
     if result is None:
       result = JustifiedValue(None, UnknownJustification())
     justification = FullJustification("unmanaged " + str(managedObject) + "." + self.methodName + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")", result.value, self.lineNumber, callJustification, [result.justification])
@@ -1589,7 +1626,7 @@ class NativeClassDefinition(object):
   def __str__(self):
     return "native classdef:" + str(self.managedClassName)
 
-#the definition of a method that's implemented by a native method'
+#the definition of a method that's implemented by a native method
 class NativeMethodDefinition(object):
   def __init__(self, methodName, argumentNames=[]):
     self.methodName = methodName
@@ -1867,6 +1904,7 @@ def equalityCheck():
 def suggestion():
   program = Program()
   program.put([
+    Print(Str("Loading 1/3...")),
     #some high-level ideas to try:
     #hardcoded prompts
       #recommend reading the logs
@@ -2116,11 +2154,12 @@ def suggestion():
     ]),
 
 
-
     Var("solver", Call("makeSolver")),
+    Print(Str("Loading 2/3...")),
 
     #a query given to the user that the user is encouraged to respond to
     Class("Question")
+      .vars({"communicator":"Communicator"})
       .func("answer", ["responseText"], [
         #called when the user gives a response
         AbstractException()
@@ -2131,6 +2170,9 @@ def suggestion():
       ])
       .func("isSatisfied", [], [
         AbstractException()
+      ])
+      .func("recognizesAnswer", ["responseText"], [
+        Return(Bool(True)),
       ]),
 
     #a query given to the user that consists of several related questions
@@ -2142,7 +2184,6 @@ def suggestion():
       ])
       .func("addQuestion", ["question"], [
         DotCall(SelfGet("questions"), "append", [Get("question")]),
-        #Print(DotCall(Get("question"), "getQueryText")),
       ])
       .func("getNextQuestion", [], [
         Return(DotCall(SelfGet("questions"), "tryGet", [Num(0)])),
@@ -2168,6 +2209,15 @@ def suggestion():
         ]),
         If(SelfCall("isSatisfied")).then([
           SelfCall("done")
+        ]),
+      ])
+      .func("recognizesAnswer", ["text"], [
+        Var("nextQuestion", SelfCall("getNextQuestion")),
+        If(IsNone(Get("nextQuestion"))).then([
+          Return(Bool(False)),
+        ])
+        .otherwise([
+          Return(DotCall(Get("nextQuestion"), "recognizesAnswer", [Get("text")])),
         ]),
       ])
       .func("done", [], [
@@ -2198,10 +2248,9 @@ def suggestion():
     #a request from the Communicator to the user to describe a fact to give to the Solver
     Class("FactQuery")
       .inherit("CompositeQuestion")
-      .vars({"communicator":"Communicator",
-          "keyPrompt":"TextQuestion",
+      .vars({"keyPrompt":"TextQuestion",
           "valuePrompt":"TextQuestion"})
-      .init(["communicator"], [
+      .init([], [
         SuperCall("__init__"),
         SelfSet("keyPrompt", New("TextQuestion", [Str("Fact name:")])),
         SelfSet("valuePrompt", New("TextQuestion", [Str("Fact value:")])),
@@ -2217,14 +2266,55 @@ def suggestion():
 
     Class("UsernameQuery")
       .inherit("TextQuestion")
-      .vars({"communicator":"Communicator"})
-      .init(["communicator"], [
+      .init([], [
         SuperCall("__init__", [Str("username: ")]),
       ])
       .func("done", [], [
         DotCall(SelfGet("communicator"), "setUsername", [SelfGet("responseText")]),
       ]),
 
+    Class("MultipleChoiceQuestion")
+      .inherit("Question")
+      .vars({"choices":"List<String>"})
+	  .init([], [
+	    SelfSet("choices", New("List")),
+	  ])
+      .func("addChoice", ["choice"], [
+        DotCall(SelfGet("choices"), "append", [Get("choice")]),
+      ])
+      .func("getChoice", ["indexText"], [
+        Var("intChoice", Int(Get("choice"))),
+        Var("result", Bool(False)),
+        If(Not(IsNone(Get("intChoice")))).then([
+          Set("result", DotCall(SelfGet("choices"), "tryGet", [Get("intChoice")])),
+        ]),
+        Return(Get("result")),
+      ])
+      .func("recognizesAnswer", ["choice"], [
+        Return(Not(IsNone(SelfCall("getChoice", [Get("choice")])))),
+      ])
+      .func("answer", ["responseText"], [
+        SelfCall("choseChoice", [SelfCall("getChoice", [Get("responseText")])]),
+      ])
+      .func("choseChoice", ["choiceText"], [
+        AbstractException(),  
+      ])
+      .func("getQueryText", [], [
+        Var("result", New("String")),
+        For("i", Num(0), DotCall(SelfGet("choices"), "getLength"), [
+          Var("choice", DotCall(SelfGet("choices"), "get", [Get("i")])),
+          Set("result", Concat([Get("result"), Get(DotCall(Get("i"), "toString")), Str(" "), Get("choice"), Str("\n")])),
+        ]),
+        Return(Get("result")),
+      ]),
+ 
+    Class("SolveProblem_Query")
+      .inherit("MultipleChoiceQuestion")
+      .func("choseChoice", ["choiceText"], [
+        DotCall(SelfGet("communicator"), "solveProblem", [Get("choiceText")]),
+      ]),
+  
+             
     #talks to the user, answers "why", forwards requests onto the Solver
     Class("Communicator")
       .vars({"universe": "Universe",
@@ -2233,7 +2323,8 @@ def suggestion():
       .init([], [
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
-        SelfCall("setUsername", [Ask(Str("username: "))]),
+        SelfCall("setUsername", [Str("jeff")]),
+        #SelfCall("setUsername", [Ask(Str("username: "))]),
         #SelfCall("addQuestion", [New("UsernameQuery", [Get("self")])]),
       ])
       .func("showGenericHelp", [], [
@@ -2242,7 +2333,6 @@ def suggestion():
         solve  <text>    - Ask me a question and I will try to help.
         fact             - Declare that you want to enter a fact. I will ask you questions about it.
                            Telling me facts helps me to solve your problems.
-        ans    <text>    - Provides the given text as the answer to my latest question.
         y      <id>      - Ask me how I deduced statement number <id> .
         """))
       ])
@@ -2300,16 +2390,12 @@ def suggestion():
            If(DotCall(Str("y"), "equals", [Get("keyword")])).then([
               SelfCall("showJustificationHelp")
             ]).otherwise([
-              If(DotCall(Str("ans"), "equals", [Get("keyword")])).then([
-                SelfCall("showAnswerHelp")
+              If(DotCall(Str(""), "equals", [Get("keyword")])).then([
+                Print(Str("""Here is what I can understand:"""))
               ]).otherwise([
-                If(DotCall(Str(""), "equals", [Get("keyword")])).then([
-                  Print(Str("""Here is what I can understand:"""))
-                ]).otherwise([
-                  Print(Str("""Sorry; I don't recognize that keyword. Here is what I can understand:"""))
-                ]),
-                SelfCall("showGenericHelp"),
-              ])
+                Print(Str("""Sorry; I don't recognize that keyword. Here is what I can understand:"""))
+              ]),
+            SelfCall("showGenericHelp"),
             ])
           ])
         ])
@@ -2323,7 +2409,14 @@ def suggestion():
           SelfCall("showJustificationHelp")
         ]),
       ])
-      .func("respondToSolve", ["queryText"], [
+	  .func("respondToSolve", [], [
+	    Var("question", New("SolveProblem_Query")),
+        ForEach("solution", DotGet(SelfGet("solver"), "solutions"), [
+          DotCall(Get("question"), "addChoice", [DotCall(DotGet(Get("solution"), "problem"), "toString")]),
+        ]),
+		SelfCall("addQuestion", [Get("question")]),
+	  ])
+      .func("solveProblem", ["queryText"], [
         #help solve the user's external problem
         Var("problem1", New("TextProposition", [Get("queryText")])),
         Var("universe", SelfGet("universe")),
@@ -2331,9 +2424,6 @@ def suggestion():
         Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
         If(DotCall(Num(0), "equals", [DotCall(Get("solutions"), "getLength")])).then([
           Print(Str("Sorry, I don't have any solutions to that problem. Here are the problems that I know how to solve:")),
-          ForEach("solution", DotGet(SelfGet("solver"), "solutions"), [
-            Print(DotCall(DotGet(Get("solution"), "problem"), "toString")),
-          ]),
         ]).otherwise([
           Print(Str("")),
           ForEach("solution", Get("solutions"), [
@@ -2355,37 +2445,31 @@ def suggestion():
         
         SelfCall("addQuestion", [New("FactQuery", [Get("self")])]),
       ])
-      .func("respond", ["input"], [
+      .func("respond", ["responseText"], [
         Print(Str("")),
 
-        Var("components", DotCall(Get("input"), "split", [Str(" ")])),
+        Var("components", DotCall(Get("responseText"), "split", [Str(" ")])),
         Var("component0", DotCall(Get("components"), "get", [Num(0)])),
-        Var("argumentText", DotCall(Get("input"), "exceptPrefix", [Get("component0")])),
+        Var("argumentText", DotCall(Get("responseText"), "exceptPrefix", [Get("component0")])),
         Set("argumentText", DotCall(Get("argumentText"), "exceptPrefix", [Str(" ")])),
 
         If(DotCall(Str("y"), "equals", [Get("component0")])).then([
           SelfCall("respondToWhy", [Get("argumentText")])
         ]).otherwise([
          If(DotCall(Str("solve"), "equals", [Get("component0")])).then([
-            SelfCall("respondToSolve", [Get("argumentText")])
+            SelfCall("respondToSolve")
           ]).otherwise([
-            If(DotCall(Str("ans"), "equals", [Get("component0")])).then([
-              SelfCall("respondToAnswer", [Get("argumentText")])
+            If(DotCall(Str("fact"), "equals", [Get("component0")])).then([
+              SelfCall("respondToFactEntry")
             ]).otherwise([
-              If(DotCall(Str("fact"), "equals", [Get("component0")])).then([
-                SelfCall("respondToFactEntry")
+              If(DotCall(Str("help"), "equals", [Get("component0")])).then([
+                SelfCall("respondToHelp", [Get("argumentText")]),
               ]).otherwise([
-                If(DotCall(Str("help"), "equals", [Get("component0")])).then([
-                  SelfCall("respondToHelp", [Get("argumentText")]),
+                If(DotCall(SelfGet("question"), "recognizesAnswer", [Get("responseText")])).then([
+                  DotCall(SelfGet("question"), "answer", [Get("responseText")]),
                 ]).otherwise([
-                  If(Not(DotCall(SelfGet("question"), "isSatisfied"))).then([
-                    #Print(Str("If you're answering my question, you have to prefix your entry with 'ans ' so I can be sure that that's what you mean")),
-                    #Print(Str("")),
-                    Print(Concat([Str("Try 'ans "), Get("input"), Str("' to answer my question ('"), DotCall(SelfGet("question"), "getQueryText"), Str("') or type 'help' for help")])),
-                  ]).otherwise([
-                    Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
-                    SelfCall("showGenericHelp"),
-                  ])
+                  Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
+                  SelfCall("showGenericHelp"),
                 ])
               ])
             ])
