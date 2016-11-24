@@ -1,13 +1,14 @@
-print("Initializing...")
 # Sorry about writing this program in Python instead of a language supporting static typing such as C#, Java or Groovy
 # I wanted this program to be trivially easy to download, run, edit, and rerun, rather than just fairly easy
 # Hopefully I'll rewrite this program in another language eventually
 
+from __future__ import print_function
 import subprocess
 import traceback
 import sys
 
 
+print("...")
 
 #############################################################################################################################################################################################
 #For determining where in this file (jeffry.gaston.py) we are
@@ -34,7 +35,8 @@ class ExternalStackInfo(object):
   def get_root_relevantLineNumber(self):
     #Return the line in the call stack closest to the root, excluding ignored lines
     #Generally only relevant if statements are being added to the Program
-    for entry in self.extractStack():
+    stack = self.extractStack()
+    for entry in stack:
       candidate = self.extract_lineNumber(entry)
       if candidate not in self.ignoredLineNumbers:
         return candidate
@@ -721,6 +723,7 @@ class Justification(object):
     justificationsById.append(self)
     self.interesting = True
     self.implementationLocation = externalStackInfo.get_leaf_relevantLineNumber()
+    self.logicLocation = None
 
   def addSupporter(self, supporter):
     if not isinstance(supporter, Justification):
@@ -728,6 +731,8 @@ class Justification(object):
     if supporter.justificationId > self.justificationId:
       logger.fail("Added a supporter (" + str(supporter) + ") with higher id to the supportee (" + str(self) + ")")
     self.supporters.append(supporter)
+    if self.logicLocation is None:
+      self.logicLocation = supporter.logicLocation
 
   def getSupporters(self):
     return self.supporters
@@ -818,7 +823,6 @@ class AndJustification(Justification):
       self.addSupporter(justification)
     if "__main__" in description:
       logger.fail("Invalid description (probably invalid class) passed to AndJustification: " + description, self)
-    self.logicLocation = None
 
   def describe(self):
     description = "[lines " + str(self.implementationLocation) + "/" + str(self.logicLocation) + "]: "
@@ -929,7 +933,7 @@ class JustifiedValue(object):
     return str(self)
 
 #############################################################################################################################################################################################
-#TThings relating to value providers
+#Things relating to value providers
 
 #abstract class that returns a value
 class ValueProvider(object):
@@ -1045,13 +1049,15 @@ class Ask(ValueProvider):
     if prompt is not None:
       message += " when asked '" + str(prompt) + "'"
     return self.execution.getScope().newObject("String", [JustifiedValue(enteredText, UnknownJustification())], TextJustification(message))
-    #return JustifiedValue(result, TextJustification(message))
 
   def getChildren(self):
     result = []
     if self.promptProvider is not None:
       result.append(self.promptProvider)
     return result
+
+  def __str__(self):
+    return str(self.promptProvider)
 
 #tells whether two things are equal
 class Eq(ValueProvider):
@@ -1083,13 +1089,11 @@ class Eq(ValueProvider):
     else:
       description += "!="
     description += str(self.provider2)
-    #return JustifiedValue(matches, AndJustification(description, [EqualJustification('value 1', info1.value, info1.justification), EqualJustification('value 2', info2.value, info2.justification)]))
     justification1 = FullJustification(str(self.provider1), info1.value, self.lineNumber, callJustification, [info1.justification])
     justification2 = FullJustification(str(self.provider2), info2.value, self.lineNumber, callJustification, [info2.justification])
     justification = AndJustification(description, [justification1, justification2])
     justifiedValue = JustifiedValue(matches, justification)
-    resultInfo = self.execution.getScope().newObject("Bool", [justifiedValue], callJustification)
-    resultInfo.justification.interesting = False #users won't be interested in the fact that we allocated a managed object to store the results of the comparison; they're be more likely to be interested in why the result was what it was
+    resultInfo = self.execution.getScope().newBoringObject("Bool", [justifiedValue], callJustification)
     return resultInfo
 
   def getChildren(self):
@@ -1132,7 +1136,6 @@ class IsNone(ValueProvider):
   def process(self, callJustification):
     subInfo = self.provider.process(callJustification)
     resultValue = (subInfo.value is None)
-    #logger.message("isNone = " + str(resultValue) + " for " + str(subInfo.value) + " of class " + str(subInfo.value.__class__))
     resultInfo = self.execution.getScope().newBoringObject("Bool", [JustifiedValue(resultValue, subInfo.justification)], callJustification)
 
     description = str(self) + " = " + str(resultValue)
@@ -1169,7 +1172,6 @@ class Plus(ValueProvider):
         logger.fail("Invalid return data type for " + str(sum) + " (not object)", sum.justification)
 
     justifications = [info.justification for info in infos]
-    #return JustifiedValue(sum, AndJustification(self.getVariableName() + " equals " + str(sum) + " (in " + str(self.definitionScope) + ")", justifications))
     justification = FullJustification(str(self), sum, self.lineNumber, callJustification, justifications)
     return JustifiedValue(sum.value, justification)
 
@@ -1283,7 +1285,7 @@ class ClassDefinition(object):
 
 #declares a class
 class Class(LogicStatement):
-  def __init__(self, className): #, parentClassName = None, fieldTypes = {}, methodDefiners = []):
+  def __init__(self, className):
     super(Class, self).__init__()
     self.className = className
     self.parentClassName = None
@@ -1368,7 +1370,6 @@ class DotSet(LogicStatement):
     owner = ownerInfo.value
     valueInfo = self.valueProvider.process(callJustification)
     value = valueInfo.value
-    #owner.setInfo(self.propertyName, JustifiedValue(value, AndJustification(stringUtils.toGetterText(owner, self.propertyName) + "=" + str(value), [justification, valueInfo.justification])))
     justification = FullJustification(stringUtils.toGetterText(owner, self.propertyName), value, self.lineNumber, callJustification, [valueInfo.justification])
     owner.setInfo(self.propertyName, JustifiedValue(value, justification))
 
@@ -1393,7 +1394,6 @@ class DotGet(ValueProvider):
     valueInfo = owner.getInfo(self.propertyName)
     description = stringUtils.toGetterText(owner, self.propertyName)
     justification = FullJustification(description, valueInfo.value, self.lineNumber, callJustification, [ownerInfo.justification, valueInfo.justification])
-    #return JustifiedValue(valueInfo.value, AndJustification(description, [ownerInfo.justification, valueInfo.justification]))
     return JustifiedValue(valueInfo.value, justification)
 
   def getChildren(self):
@@ -1490,7 +1490,6 @@ class DotCallImpl(LogicStatement):
     return JustifiedValue(result.value, justification)
 
   def __str__(self):
-    #return "(" + str(self.classScope_provider) + "): (" + str(self.argumentProviders[0]) + ")." + str(self.methodName) + "(" + ", ".join([str(provider) for provider in self.argumentProviders[1:]]) + ")"
     return "(" + str(self.argumentProviders[0]) + ")." + str(self.methodName) + "(" + ", ".join([str(provider) for provider in self.argumentProviders[1:]]) + ")"
 
 #calls a particular method on the superclass
@@ -1627,7 +1626,6 @@ class ListWrapper(NativeObject):
     index = indexInfo.value.getNumber()
     if index >= len(self.impl):
       itemJustification = TextJustification("index (" + str(index) + ") is past the end of " + str(self) + " (" + str(len(self.impl)) + ")")
-      #itemInfo = self.execution.getScope().newObject("String", [JustifiedValue(None, itemJustification)], callJustification)
       item = None
     else:
       itemInfo = self.impl[index]
@@ -1664,12 +1662,10 @@ class ListWrapper(NativeObject):
 
 class StringWrapper(NativeObject):
   def __init__(self, callJustification, textInfo):
-    #print("making stringwrapper as " + str(textInfo))
     super(StringWrapper, self).__init__()
     self.textInfo = textInfo
     if textInfo.value is not None and not isinstance(textInfo.value, type("")):
       logger.fail("Invalid class (not string) for " + str(textInfo))
-    #print("done making stringwrapper as " + str(textInfo))
 
   def toString(self, callJustification):
     return JustifiedValue(self.managedObject, callJustification)
@@ -1694,8 +1690,7 @@ class StringWrapper(NativeObject):
     otherString = other.value
     text = self.textInfo.value + otherString.textInfo.value
     justification = AndJustification("concatenation = " + str(text), [callJustification, self.textInfo.justification, otherString.textInfo.justification])
-    resultInfo = self.managedObject.execution.getScope().newObject("String", [JustifiedValue(text, justification)], callJustification)
-    resultInfo.justification.interesting = False #users won't care that we allocated a managed boolean to hold the results of the comparison
+    resultInfo = self.managedObject.execution.getScope().newBoringObject("String", [JustifiedValue(text, justification)], callJustification)
     return resultInfo
 
   def equals(self, callJustification, otherInfo):
@@ -1753,8 +1748,7 @@ class BoolWrapper(NativeObject):
     else:
       comparison = "!="
     justification = AndJustification(str(ourValue) + comparison + str(theirValue), [self.valueInfo.justification, other.valueInfo.justification])
-    resultInfo = self.managedObject.execution.getScope().newObject("Bool", [JustifiedValue(result, justification)], callJustification)
-    resultInfo.interesting = False #users probably won't care that we created a managed boolean to hold the results of the comparison; they're probably more interested in the reason for the result of the comparison
+    resultInfo = self.managedObject.execution.getScope().newBoringObject("Bool", [JustifiedValue(result, justification)], callJustification)
     return resultInfo
 
 
@@ -1783,7 +1777,6 @@ class DictionaryWrapper(NativeObject):
 
   def __str__(self):
     return "DictWrapper"
-  #  return str(self.items)
       
 class NumberWrapper(NativeObject):
   def __init__(self, callJustification, numberInfo):
@@ -2229,7 +2222,6 @@ def suggestion():
         SuperCall("__init__", [Str("username: ")]),
       ])
       .func("done", [], [
-        Print(Concat([Str("Hi, "), SelfGet("responseText")])),
         DotCall(SelfGet("communicator"), "setUsername", [SelfGet("responseText")]),
       ]),
 
@@ -2241,7 +2233,8 @@ def suggestion():
       .init([], [
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
-        SelfCall("addQuestion", [New("UsernameQuery", [Get("self")])]),
+        SelfCall("setUsername", [Ask(Str("username: "))]),
+        #SelfCall("addQuestion", [New("UsernameQuery", [Get("self")])]),
       ])
       .func("showGenericHelp", [], [
         Print(Str("""
@@ -2292,6 +2285,8 @@ def suggestion():
         DotCall(SelfGet("question"), "addQuestion", [Get("question")]),
       ])
       .func("setUsername", ["username"], [
+        Print(Str("")),
+        Print(Concat([Str("Welcome, "), Get("username")])),
         SelfSet("username", Get("username")),
       ])
       .func("respondToHelp", ["text"], [
@@ -2383,12 +2378,13 @@ def suggestion():
                 If(DotCall(Str("help"), "equals", [Get("component0")])).then([
                   SelfCall("respondToHelp", [Get("argumentText")]),
                 ]).otherwise([
-                  #Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
-                  #SelfCall("showGenericHelp"),
                   If(Not(DotCall(SelfGet("question"), "isSatisfied"))).then([
                     #Print(Str("If you're answering my question, you have to prefix your entry with 'ans ' so I can be sure that that's what you mean")),
                     #Print(Str("")),
                     Print(Concat([Str("Try 'ans "), Get("input"), Str("' to answer my question ('"), DotCall(SelfGet("question"), "getQueryText"), Str("') or type 'help' for help")])),
+                  ]).otherwise([
+                    Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
+                    SelfCall("showGenericHelp"),
                   ])
                 ])
               ])
@@ -2399,10 +2395,10 @@ def suggestion():
       .func("talkOnce", [], [
         Var("prompt", Const(None)),
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
+          #the prompt here is made to look like a Bash ssh prompt since it's familiar to users and kind of cute - we're not actually ssh'd into anything
           If(DotCall(Str(""), "equals", [SelfGet("username")])).then([
             Set("prompt", Str("whybot $ ")),
           ]).otherwise([
-            #this doesn't have much direct function other than being cute
             Set("prompt", Concat([SelfGet("username"), Str("@"), Str("whybot $ ")]))
           ])
         ]).otherwise([
@@ -2423,68 +2419,6 @@ def suggestion():
   ])
   execution = Execution(program)
   execution.run()
-  #suggestion = execution.getScope().getInfo("suggestion")
-  #logger.message("Program result value = " + str(suggestion.value) + " because " + str(suggestion.justification.explainRecursive()))
-
-
-def treeProgram():
-  program = Program()
-  program.put([
-    #prompt the user for a bool
-    Func("readBool", ["prompt"], [
-      Var("response", Ask(Get("prompt"))),
-      If(Eq(Get("response"), Str("Yes"))).then([
-        Return(Bool(True))
-      ]).otherwise([
-        If(Eq(Get("response"), Str("yes"))).then([
-          Return(Bool(True))
-        ]).otherwise([
-          If(Eq(Get("response"), Str("y"))).then([
-            Return(Bool(True))
-          ]).otherwise([
-            Return(Bool(False))
-          ])
-        ])
-      ])
-    ]),
-
-    Var("suggestion", Const(None)),
-
-    #see if the user should read the logs
-    Var("didReadLogs", Call("readBool", [Str("Have you read the logs?")])),
-    If(Eq(Get("didReadLogs"), Bool(False))).then([
-      Var("canFindTheLogs", Call("readBool", [Str("Do you know where to find logs?")])),
-      If(Get("canFindTheLogs")).then([
-        Set("suggestion", Str("Read the logs."))
-      ]).otherwise([
-        Var("triedFindingLogs", Call("readBool", [Str("Have you spent at least 1 hour trying to find the logs?")])),
-        If(Get("triedFindingLogs")).otherwise([
-          Set("suggestion", Str("Your new subtask is to try to read the logs. Note that you can ask me for help with that task too."))
-        ])
-      ])
-    ]),
-
-    #some more suggestions
-    If(Eq(Get("suggestion"), Const(None))).then([
-      Var("haveYouGoogledIt", Call("readBool", [Str("Have you googled it?")])),
-      If(Get("haveYouGoogledIt")).then([
-        Var("haveYouAskedSomeone", Call("readBool", [Str("Have you asked a human for help?")])),
-        If(Get("haveYouAskedSomeone")).otherwise([
-          Set("suggestion", Str("Ask someone"))
-        ])
-      ]).otherwise([
-        Set("suggestion", Str("Google it"))
-      ])
-    ]),
-
-    If(Eq(Get("suggestion"), Const(None))).then([
-      Set("suggestion", Str("I'm not sure"))
-    ])
-  ])
-  execution = Execution(program)
-  execution.run()
-  suggestion = execution.getScope().getInfo("suggestion")
-  logger.message("Program result value = " + str(suggestion.value) + " because " + str(suggestion.justification.explainRecursive()))
 
 def inheritanceTest():
   program = Program()
