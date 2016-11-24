@@ -310,7 +310,7 @@ class Scope(object):
   def newObject(self, className, justifiedArguments, callJustification):
     classInfo = self.tryGetInfo(className)
     if classInfo is None:
-      logger.fail("Class " + str(className) + " is not defined", justification)
+      logger.fail("Class " + str(className) + " is not defined", callJustification)
     classDefinition = classInfo.value
 
     parentClassName = classDefinition.parentClassName
@@ -668,33 +668,41 @@ class FunctionDefinition(object):
   def __init__(self, functionName, argumentNames, lineNumber, statements):
     self.functionName = functionName
     self.argumentNames = argumentNames
-    self.statements = statements
     self.lineNumber = lineNumber
+    self.statements = statements
     
   def __str__(self):
     return self.functionName
 
 #a function definition
 class Func(LogicStatement):
-  def __init__(self, functionName, argumentNames, statements=[]):
+  def __init__(self, signature, statements):
     super(Func, self).__init__()
-    self.functionName = functionName
-    if not isinstance(argumentNames, list):
-      raise Exception("Invalid argument " + str(argumentNames) + "; must be a list")
-    self.argumentNames = argumentNames
-    self.statements = statements
-    self.children += statements
-    self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
+    self.functionName = signature.functionName
+    if not isinstance(signature.argumentNames, list):
+      raise Exception("Invalid argument " + str(signature.argumentNames) + "; must be a list")
+    self.argumentNames = signature.argumentNames
+    self.statements = []
+    self.lineNumber = signature.lineNumber
+    self.addStatements(statements)
 
   def process(self, justification):
     self.execution.getScope().declareFunction(FunctionDefinition(self.functionName, self.argumentNames, self.lineNumber, self.statements), justification)
 
-  def then(self, statements):
+  def addStatements(self, statements):
     self.statements += statements
+    self.children += statements
     return self
 
   def __str__(self):
     return "def " + str(self.functionName)
+
+#a definition of the signature of a method
+class Sig(object):
+  def __init__(self, functionName, argumentNames=[]):
+    self.functionName = functionName
+    self.argumentNames = argumentNames
+    self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
 
 #a member function definition
 #class MFunc(Func):
@@ -955,6 +963,7 @@ class ValueProvider(object):
   def __init__(self):
     self.execution = None
     self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
+    self.definitionScope = None
     
   def beOwned(self, execution):
     self.execution = execution
@@ -1052,6 +1061,7 @@ class JustificationGetter(ValueProvider):
 #
 class Ask(ValueProvider):
   def __init__(self, promptProvider=None):
+    super(Ask, self).__init__()
     self.promptProvider = promptProvider
 
   def process(self, callJustification):
@@ -1315,8 +1325,9 @@ class Class(LogicStatement):
     self.fieldTypes = fieldTypes
     return self
 
-  def func(self, methodName, argumentNames, statements):
-    f = Func(methodName, ["self"] + argumentNames, statements)
+  def func(self, functionSignature, statements):
+    functionSignature.argumentNames = ["self"] + functionSignature.argumentNames
+    f = Func(functionSignature, statements)
     self.methodDefiners.append(f)
     self.children.append(f)
     return self #to enable the caller to declare another function
@@ -1327,7 +1338,7 @@ class Class(LogicStatement):
     for argumentName in argumentNames:
       if argumentName in self.fieldTypes:
         valueCopierStatements.append(SelfSet(argumentName, Get(argumentName)))
-    return self.func("__init__", argumentNames, valueCopierStatements + statements)
+    return self.func(Sig("__init__", argumentNames), valueCopierStatements + statements)
 
   def process(self, justification):
     classDefinition = ClassDefinition(self.className, self.parentClassName, self.fieldTypes, self.methodDefiners)
@@ -1340,7 +1351,7 @@ class Class(LogicStatement):
 #makes a new object
 class New(ValueProvider):
   def __init__(self, className, argumentProviders=[]):
-    super(ValueProvider, self).__init__()
+    super(New, self).__init__()
     self.className = className
     self.argumentProviders = argumentProviders
 
@@ -1350,6 +1361,8 @@ class New(ValueProvider):
     numNonSelfParameters = len(callJustifications) - 1
 
     text = "new " + str(self.className) + "(" + ", ".join([str(info.value) for info in argumentInfos]) + ")"
+    if self.execution is None:
+      logger.fail("Invalid None execution on " + str(self) + " at " + str(self.lineNumber))
     result = self.execution.getScope().newObject(self.className, argumentInfos, AndJustification(text, callJustifications))
     return result
 
@@ -1373,19 +1386,28 @@ class Num(New):
 
 class Range(ValueProvider):
   def __init__(self, arg1Provider, arg2Provider=None):
+    super(Range, self).__init__()
     if arg2Provider is not None:
       self.highProvider = arg2Provider
       self.lowProvider = arg1Provider
     else:
       self.highProvider = arg1Provider
       self.lowProvider = Num(0)
-    super(Range, self).__init__()
+
+  def getChildren(self):
+    return [self.lowProvider, self.highProvider]
+
 	  
   def process(self, callJustification):
     lowInfo = self.lowProvider.process(callJustification)
     highInfo = self.highProvider.process(callJustification)
-    result = range(lowInfo.value, highInfo.value)
-    return JustifiedValue(result, AndJustification(str(self) + " = " + str(result), [lowInfo.justification, highInfo.justification]))
+    outputInfo = self.execution.getScope().newBoringObject("List", [], callJustification)
+    for item in range(lowInfo.value.getNumber(), highInfo.value.getNumber()):
+      newItem = self.execution.getScope().newBoringObject("Num", [JustifiedValue(item, UnknownJustification())], callJustification)
+      outputInfo.value.append(callJustification, newItem)
+    return JustifiedValue(outputInfo.value,
+             AndJustification(str(self) + " = (" + str(lowInfo.value.getNumber()) + "," + str(highInfo.value.getNumber()) + ")",
+               [lowInfo.justification, highInfo.justification]))
   
   def __str__(self):
     return "range(" + str(self.lowProvider) + "," + str(self.highProvider) + ")"
@@ -1455,6 +1477,9 @@ class DefinedInClass_Scope(ValueProvider):
 
 #returns the parent of the scope in which the current class is defined (so almost the parent's ClassDefinition)
 class SuperScope(DefinedInClass_Scope):
+  def __init__(self):
+    super(SuperScope, self).__init__()
+
   def process(self, justification):
     return JustifiedValue(self.definitionScope.parent, TextJustification("parent scope of " + str(self.definitionScope) + " is " + str(self.definitionScope.parent)))
 
@@ -1833,6 +1858,10 @@ class NumberWrapper(NativeObject):
     justification = AndJustification(str(self.getNumber()) + " == " + str(other.getNumber()), [self.numberInfo.justification, otherInfo.justification])
     return self.managedObject.execution.getScope().newBoringObject("Bool", [JustifiedValue(resultBool, justification)], callJustification)
 
+  def toString(self, callJustification):
+    outputString = str(self.numberInfo.value)
+    return self.execution.getScope().newBoringObject("String", [JustifiedValue(outputString, self.numberInfo.justification)], callJustification)
+
   def __str__(self):
     return str(self.numberInfo.value)
 
@@ -1933,7 +1962,7 @@ def suggestion():
 
     #a thing that can be done
     Class("Action")
-      .func("offer", [], [
+      .func(Sig("offer", []), [
         AbstractException()
       ]),
 
@@ -1942,10 +1971,10 @@ def suggestion():
       .vars({"message": "string"})
       .init(["message"], [
       ])
-      .func("offer", [], [
+      .func(Sig("offer", []), [
         PrintWithId(SelfGet("message")),
       ])
-      .func("toString", [], [
+      .func(Sig("toString", []), [
         Return(SelfGet("message"))
       ]),
 
@@ -1954,15 +1983,15 @@ def suggestion():
       .init([], [
         SelfSet("props", New("Dict")),
       ])
-      .func("getProp", ["key"], [
+      .func(Sig("getProp", ["key"]), [
         Return(DotCall(SelfGet("props"), "get", [Get("key")])),
       ])
-      .func("putProp", ["key", "value"], [
+      .func(Sig("putProp", ["key", "value"]), [
         DotCall(SelfGet("props"), "put", [Get("key"), Get("value")]),
       ]),
 
     Class("Proposition")
-      .func("evaluate", ["universe"], [
+      .func(Sig("evaluate", ["universe"]), [
         AbstractException()
       ]),
 
@@ -1972,13 +2001,13 @@ def suggestion():
       .vars({"text": "String"})
       .init(["text"], [
       ])
-      .func("evaluate", ["universe"], [
+      .func(Sig("evaluate", ["universe"]), [
         Return(DotCall(Get("universe"), "getProp", [SelfGet("text")])),
       ])
-      .func("equals", ["other"], [
+      .func(Sig("equals", ["other"]), [
         Return(DotCall(SelfGet("text"), "equals", [DotGet(Get("other"), "text")])),
       ])
-      .func("toString", [], [
+      .func(Sig("toString", []), [
         Return(SelfGet("text"))
       ]),
 
@@ -1988,13 +2017,13 @@ def suggestion():
       .vars({"left":"Proposition", "right":"Proposition"}) 
       .init(["left", "right"], [
       ])
-      .func("evaluate", ["universe"], [
+      .func(Sig("evaluate", ["universe"]), [
         Return(Eq(
             DotCall(SelfGet("left"), "evaluate", [Get("universe")]), 
             DotCall(SelfGet("right"), "evaluate", [Get("universe")])
         )),
       ])
-      .func("equals", ["other"], [
+      .func(Sig("equals", ["other"]), [
         Var("result", Bool(False)),
         If(DotCall(SelfGet("left"), "equals", [DotGet(Get("other"), "left")])).then([
           If(DotCall(SelfGet("right"), "equals", [DotGet(Get("other"), "right")])).then([
@@ -2003,7 +2032,7 @@ def suggestion():
         ]),
         Return(Get("result"))
       ])
-      .func("toString", [], [
+      .func(Sig("toString", []), [
         Return(Concat([
           DotCall(SelfGet("left"), "toString"),
           Str(" == "),
@@ -2016,7 +2045,7 @@ def suggestion():
       .vars({"problem":"Proposition", "prerequisite":"Proposition", "fix":"Action"})
       .init(["problem", "prerequisite", "fix"], [      
       ])
-      .func("toString", [], [
+      .func(Sig("toString", []), [
         Return(Concat([
           Str('If "'),
           DotCall(SelfGet("prerequisite"), "toString"),
@@ -2027,7 +2056,7 @@ def suggestion():
           Str('" should be all set.'),
         ]))
       ])
-      .func("offer", [], [
+      .func(Sig("offer", []), [
         Print(Concat([Str("If you can solve "), DotCall(SelfGet("prerequisite"), "toString")])),
         DotCall(SelfGet("fix"), "offer"),
       ]),
@@ -2038,14 +2067,14 @@ def suggestion():
       .init([], [
         SelfSet("solutions", New("List")),
       ])
-      .func("addSolution", ["solution"], [
+      .func(Sig("addSolution", ["solution"]), [
         DotCall(SelfGet("solutions"), "append", [Get("solution")]),
       ])
-      .func("trySolve", ["problem", "universe"], [
+      .func(Sig("trySolve", ["problem", "universe"]), [
         Var("solutions", SelfCall("getDoableSolutions", [Get("problem"), Get("universe")])),
         Return(Get("solutions")),
       ])
-      .func("getRelevantDirectSolutions", ["problem"], [
+      .func(Sig("getRelevantDirectSolutions", ["problem"]), [
         Var("relevantSolutions", New("List")),
         ForEach("candidateSolution", SelfGet("solutions"), [
           If(DotCall(DotGet(Get("candidateSolution"), "problem"), "equals", [Get("problem")])).then([
@@ -2054,7 +2083,7 @@ def suggestion():
         ]),
         Return(Get("relevantSolutions"))
       ])
-      .func("getDoableSolutions", ["problem", "universe"], [
+      .func(Sig("getDoableSolutions", ["problem", "universe"]), [
         Var("relevantSolutions", SelfCall("getRelevantDirectSolutions", [Get("problem")])),
         Var("doableSolutions", New("List")),
         ForEach("candidateSolution", Get("relevantSolutions"), [
@@ -2080,7 +2109,7 @@ def suggestion():
         Return(Get("doableSolutions")),
       ]),
 
-    Func("makeSolver", [], [
+    Func(Sig("makeSolver", []), [
       Var("solver", New("Solver")),
 
       #prerequisites of solutions
@@ -2160,18 +2189,18 @@ def suggestion():
     #a query given to the user that the user is encouraged to respond to
     Class("Question")
       .vars({"communicator":"Communicator"})
-      .func("answer", ["responseText"], [
+      .func(Sig("answer", ["responseText"]), [
         #called when the user gives a response
         AbstractException()
       ])
-      .func("getQueryText", [], [
+      .func(Sig("getQueryText", []), [
         #the text to show to the user in order to ask this question
         AbstractException()
       ])
-      .func("isSatisfied", [], [
+      .func(Sig("isSatisfied", []), [
         AbstractException()
       ])
-      .func("recognizesAnswer", ["responseText"], [
+      .func(Sig("recognizesAnswer", ["responseText"]), [
         Return(Bool(True)),
       ]),
 
@@ -2182,26 +2211,26 @@ def suggestion():
       .init([], [
         SelfSet("questions", New("List")),
       ])
-      .func("addQuestion", ["question"], [
+      .func(Sig("addQuestion", ["question"]), [
         DotCall(SelfGet("questions"), "append", [Get("question")]),
       ])
-      .func("getNextQuestion", [], [
+      .func(Sig("getNextQuestion", []), [
         Return(DotCall(SelfGet("questions"), "tryGet", [Num(0)])),
       ])
-      .func("removeQuestion", [], [
+      .func(Sig("removeQuestion", []), [
         DotCall(SelfGet("questions"), "removeAt", [Num(0)]),
       ])
-      .func("getQueryText", [], [
+      .func(Sig("getQueryText", []), [
         If(Not(SelfCall("isSatisfied"))).then([
           Return(DotCall(SelfCall("getNextQuestion"), "getQueryText"))
         ]).otherwise([
           Return(Str(None))
         ])
       ])
-      .func("isSatisfied", [], [
+      .func(Sig("isSatisfied", []), [
         Return(IsNone(SelfCall("getNextQuestion"))),
       ])
-      .func("answer", ["text"], [
+      .func(Sig("answer", ["text"]), [
         Var("question", SelfCall("getNextQuestion")),
         DotCall(Get("question"), "answer", [Get("text")]),
         If(DotCall(Get("question"), "isSatisfied")).then([
@@ -2211,7 +2240,7 @@ def suggestion():
           SelfCall("done")
         ]),
       ])
-      .func("recognizesAnswer", ["text"], [
+      .func(Sig("recognizesAnswer", ["text"]), [
         Var("nextQuestion", SelfCall("getNextQuestion")),
         If(IsNone(Get("nextQuestion"))).then([
           Return(Bool(False)),
@@ -2220,7 +2249,7 @@ def suggestion():
           Return(DotCall(Get("nextQuestion"), "recognizesAnswer", [Get("text")])),
         ]),
       ])
-      .func("done", [], [
+      .func(Sig("done", []), [
       ]),
 
 
@@ -2231,18 +2260,18 @@ def suggestion():
       .init(["queryText"], [
         SelfSet("satisfied", Bool(False)),
       ])
-      .func("getQueryText", [], [
+      .func(Sig("getQueryText", []), [
         Return(SelfGet("queryText")),
       ])
-      .func("isSatisfied", [], [
+      .func(Sig("isSatisfied", []), [
         Return(SelfGet("satisfied")),
       ])
-      .func("answer", ["responseText"], [
+      .func(Sig("answer", ["responseText"]), [
         SelfSet("responseText", Get("responseText")),
         SelfSet("satisfied", Bool(True)),
         SelfCall("done")
       ])
-      .func("done", [], [
+      .func(Sig("done", []), [
       ]),
 
     #a request from the Communicator to the user to describe a fact to give to the Solver
@@ -2257,7 +2286,7 @@ def suggestion():
         SelfCall("addQuestion", [SelfGet("keyPrompt")]),
         SelfCall("addQuestion", [SelfGet("valuePrompt")]),
       ])
-      .func("done", [], [
+      .func(Sig("done", []), [
         DotCall(SelfGet("communicator"), "enterTextFact", [
             DotGet(SelfGet("keyPrompt"), "responseText"),
             DotGet(SelfGet("valuePrompt"), "responseText")
@@ -2269,48 +2298,54 @@ def suggestion():
       .init([], [
         SuperCall("__init__", [Str("username: ")]),
       ])
-      .func("done", [], [
+      .func(Sig("done", []), [
         DotCall(SelfGet("communicator"), "setUsername", [SelfGet("responseText")]),
       ]),
 
     Class("MultipleChoiceQuestion")
       .inherit("Question")
-      .vars({"choices":"List<String>"})
+      .vars({"choices":"List<String>", "satisfied":"Bool"})
 	  .init([], [
+            SelfSet("satisfied", Bool(False)),
 	    SelfSet("choices", New("List")),
 	  ])
-      .func("addChoice", ["choice"], [
+      .func(Sig("addChoice", ["choice"]), [
         DotCall(SelfGet("choices"), "append", [Get("choice")]),
       ])
-      .func("getChoice", ["indexText"], [
-        Var("intChoice", Int(Get("choice"))),
+      .func(Sig("getChoice", ["indexText"]), [
+        Var("intChoice", Int(Get("indexText"))),
         Var("result", Bool(False)),
         If(Not(IsNone(Get("intChoice")))).then([
           Set("result", DotCall(SelfGet("choices"), "tryGet", [Get("intChoice")])),
         ]),
         Return(Get("result")),
       ])
-      .func("recognizesAnswer", ["choice"], [
+      .func(Sig("recognizesAnswer", ["choice"]), [
         Return(Not(IsNone(SelfCall("getChoice", [Get("choice")])))),
       ])
-      .func("answer", ["responseText"], [
+      .func(Sig("answer", ["responseText"]), [
+        SelfSet("satisfied", Bool(True)),
         SelfCall("choseChoice", [SelfCall("getChoice", [Get("responseText")])]),
       ])
-      .func("choseChoice", ["choiceText"], [
+      .func(Sig("choseChoice", ["choiceText"]), [
         AbstractException(),  
       ])
-      .func("getQueryText", [], [
-        Var("result", New("String")),
-        For("i", Num(0), DotCall(SelfGet("choices"), "getLength"), [
+      .func(Sig("getQueryText", []), [
+        Var("length", DotCall(SelfGet("choices"), "getLength")),
+        Var("result", Concat([Str("Choose one of these "), DotCall(Get("length"), "toString"), Str(" choices\n")])),
+        For("i", Num(0), Get("length"), [
           Var("choice", DotCall(SelfGet("choices"), "get", [Get("i")])),
-          Set("result", Concat([Get("result"), Get(DotCall(Get("i"), "toString")), Str(" "), Get("choice"), Str("\n")])),
+          Set("result", Concat([Get("result"), DotCall(Get("i"), "toString"), Str(" "), Get("choice"), Str("\n")])),
         ]),
         Return(Get("result")),
+      ])
+      .func(Sig("isSatisfied", []), [
+        Return(SelfGet("satisfied")),
       ]),
  
     Class("SolveProblem_Query")
       .inherit("MultipleChoiceQuestion")
-      .func("choseChoice", ["choiceText"], [
+      .func(Sig("choseChoice", ["choiceText"]), [
         DotCall(SelfGet("communicator"), "solveProblem", [Get("choiceText")]),
       ]),
   
@@ -2327,16 +2362,16 @@ def suggestion():
         #SelfCall("setUsername", [Ask(Str("username: "))]),
         #SelfCall("addQuestion", [New("UsernameQuery", [Get("self")])]),
       ])
-      .func("showGenericHelp", [], [
+      .func(Sig("showGenericHelp", []), [
         Print(Str("""
         help   <keyword> - Ask me for usage of keyword <keyword> .
-        solve  <text>    - Ask me a question and I will try to help.
+        solve            - Ask me to ask you what you would like solved.
         fact             - Declare that you want to enter a fact. I will ask you questions about it.
                            Telling me facts helps me to solve your problems.
         y      <id>      - Ask me how I deduced statement number <id> .
         """))
       ])
-      .func("showJustificationHelp", [], [
+      .func(Sig("showJustificationHelp", []), [
          Print(Str("""
          Some of my statements will have numbers in parentheses to the left, like this:
          """)),
@@ -2345,41 +2380,41 @@ def suggestion():
          If you type 'y <id>' then I will explain how I came to conclusion number <id>
          """)),
       ])
-      .func("showSolveHelp", [], [
+      .func(Sig("showSolveHelp", []), [
          Print(Str("""
          Ask me a question and I might be able to solve it!
          """))
       ])
-      .func("showAnswerHelp", [], [
+      .func(Sig("showAnswerHelp", []), [
          Print(Str("""
          Sometimes I will ask you questions too. You can type "ans <text>" to give "<text>" as a response to my latest question
          Don't worry, I'll remember my questions if you don't answer them right away
          """))
       ])
-      .func("showSarcasticHelpHelp", [], [
+      .func(Sig("showSarcasticHelpHelp", []), [
          Print(Str("""
          Really? You're asking for help with the 'help' keyword? Ok. Here goes:
          """)),
          SelfCall("showHelpHelp"),
       ])
-      .func("showHelpHelp", [], [
+      .func(Sig("showHelpHelp", []), [
          Print(Str("""
          help           - Ask me for a list of statements and brief usage instructions for each
          help <keyword> - Ask me for usage of keyword <keyword>
          """)),
       ])
-      .func("enterTextFact", ["key", "value"], [
+      .func(Sig("enterTextFact", ["key", "value"]), [
         DotCall(SelfGet("universe"), "putProp", [Get("key"), DotCall(Str("True"), "equals", [Get("value")])]),
       ])
-      .func("addQuestion", ["question"], [
+      .func(Sig("addQuestion", ["question"]), [
         DotCall(SelfGet("question"), "addQuestion", [Get("question")]),
       ])
-      .func("setUsername", ["username"], [
+      .func(Sig("setUsername", ["username"]), [
         Print(Str("")),
         Print(Concat([Str("Welcome, "), Get("username")])),
         SelfSet("username", Get("username")),
       ])
-      .func("respondToHelp", ["text"], [
+      .func(Sig("respondToHelp", ["text"]), [
         Var("keyword", Get("text")),
         If(DotCall(Str("help"), "equals", [Get("keyword")])).then([
           SelfCall("showSarcasticHelpHelp")
@@ -2400,7 +2435,7 @@ def suggestion():
           ])
         ])
       ])
-      .func("respondToWhy", ["idText"], [
+      .func(Sig("respondToWhy", ["idText"]), [
         #say why
         Var("justificationId", Int(Get("idText"))),
         If(DotCall(Get("justificationId"), "nonEmpty")).then([
@@ -2409,14 +2444,15 @@ def suggestion():
           SelfCall("showJustificationHelp")
         ]),
       ])
-	  .func("respondToSolve", [], [
-	    Var("question", New("SolveProblem_Query")),
+      .func(Sig("respondToSolve", []), [
+        Var("question", New("SolveProblem_Query")),
+        DotSet(Get("question"), "communicator", Get("self")),
         ForEach("solution", DotGet(SelfGet("solver"), "solutions"), [
           DotCall(Get("question"), "addChoice", [DotCall(DotGet(Get("solution"), "problem"), "toString")]),
         ]),
-		SelfCall("addQuestion", [Get("question")]),
-	  ])
-      .func("solveProblem", ["queryText"], [
+        SelfCall("addQuestion", [Get("question")]),
+      ])
+      .func(Sig("solveProblem", ["queryText"]), [
         #help solve the user's external problem
         Var("problem1", New("TextProposition", [Get("queryText")])),
         Var("universe", SelfGet("universe")),
@@ -2432,7 +2468,7 @@ def suggestion():
           ])
         ])
       ])
-      .func("respondToAnswer", ["answerText"], [
+      .func(Sig("respondToAnswer", ["answerText"]), [
         #Print(Concat([Str("Thank you for your response: "), Get("answerText")])),
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
           Print(Str("I didn't ask you a question!")),
@@ -2440,12 +2476,12 @@ def suggestion():
           DotCall(SelfGet("question"), "answer", [Get("answerText")]),
         ]),
       ])
-      .func("respondToFactEntry", [], [
+      .func(Sig("respondToFactEntry", []), [
         Print(Str("All right! What fact would you like to tell me?")),
         
         SelfCall("addQuestion", [New("FactQuery", [Get("self")])]),
       ])
-      .func("respond", ["responseText"], [
+      .func(Sig("respond", ["responseText"]), [
         Print(Str("")),
 
         Var("components", DotCall(Get("responseText"), "split", [Str(" ")])),
@@ -2476,7 +2512,7 @@ def suggestion():
           ])
         ])
       ])
-      .func("talkOnce", [], [
+      .func(Sig("talkOnce", []), [
         Var("prompt", Const(None)),
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
           #the prompt here is made to look like a Bash ssh prompt since it's familiar to users and kind of cute - we're not actually ssh'd into anything
@@ -2486,12 +2522,12 @@ def suggestion():
             Set("prompt", Concat([SelfGet("username"), Str("@"), Str("whybot $ ")]))
           ])
         ]).otherwise([
-          Set("prompt", DotCall(SelfGet("question"), "getQueryText")),
+          Set("prompt", Concat([DotCall(SelfGet("question"), "getQueryText"), Str("\nAlternatively, enter any standard menu option including 'help' for help")])),
         ]),
         Var("response", Ask(Get("prompt"))),
         DotCall(Get("self"), "respond", [Get("response")]),
       ])
-      .func("communicate", [], [
+      .func(Sig("communicate", []), [
         Print(Str("")),
         While(Bool(True), [
           SelfCall("talkOnce"),
@@ -2511,7 +2547,7 @@ def inheritanceTest():
       .init([], [
         Print(Str("running init in TestGrandParent class"))
       ])
-      .func("talk", [], [
+      .func(Sig("talk", []), [
         Print(Str("running talk in TestGrandParent class")),
       ]),
     Class("TestParent")
@@ -2521,7 +2557,7 @@ def inheritanceTest():
         SuperCall("__init__"),
         SelfCall("talk")
       ])
-      .func("talk", [], [
+      .func(Sig("talk", []), [
         Print(Str("running talk in TestParent class")),
         SuperCall("talk"),
       ]),
@@ -2531,7 +2567,7 @@ def inheritanceTest():
         Print(Str("running init in TestChild class")),
         SuperCall("__init__"),
       ])
-      .func("talk", [], [
+      .func(Sig("talk", []), [
         Print(Str("running talk in TestChild class")),
         SuperCall("talk"),
       ]),
