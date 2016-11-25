@@ -3,12 +3,10 @@
 # Hopefully I'll rewrite this program in another language eventually
 
 from __future__ import print_function
+import inspect
 import subprocess
 import traceback
 import sys
-
-
-print("Loading 0/3...")
 
 #############################################################################################################################################################################################
 #For determining where in this file (jeffry.gaston.py) we are
@@ -20,12 +18,13 @@ class ExternalStackInfo(object):
 
   def ignoreCurrentlyActiveLines(self):
     #make a note of the current stack to enable ignoring any lines currently active (which just participate in this custom interpreter and aren't part of the program being defined)
-    lineNumbers = self.extract_lineNumbers()
-    for lineNumber in lineNumbers:
-      self.ignoreLineNumber(lineNumber)
+    frame = inspect.currentframe()
+    while frame is not None:
+      self.ignoreLineNumber(frame.f_lineno)
+      frame = frame.f_back
 
-  def ignoreRange(self, minInclusive, maxInclusive):
-    for lineNumber in range(minInclusive, maxInclusive):
+  def ignoreRange(self, minInclusive, maxExclusive):
+    for lineNumber in range(minInclusive, maxExclusive):
       self.ignoreLineNumber(lineNumber)
 
   def ignoreLineNumber(self, lineNumber):
@@ -35,34 +34,28 @@ class ExternalStackInfo(object):
   def get_root_relevantLineNumber(self):
     #Return the line in the call stack closest to the root, excluding ignored lines
     #Generally only relevant if statements are being added to the Program
-    stack = self.extractStack()
-    for entry in stack:
-      candidate = self.extract_lineNumber(entry)
-      if candidate not in self.ignoredLineNumbers:
-        return candidate
-    raise Exception("Failed to identify interesting line number for stack " + str(stack))
+    lineNumber = None
+    frame = inspect.currentframe()
+    while frame is not None:
+      currentLineNumber = frame.f_lineno
+      if currentLineNumber not in self.ignoredLineNumbers:
+        lineNumber = currentLineNumber
+      frame = frame.f_back
+    if lineNumber is None:
+      raise Exception("Failed to identify interesting line number in the above stack trace")
+    return lineNumber
 
   def get_leaf_relevantLineNumber(self):
     #Return the number of the line closest to the leaf, excluding ignored lines
     #Generally relevant while the Program is executing
-    stack = self.extractStack()
-    for entry in reversed(stack):
-      candidate = self.extract_lineNumber(entry)
-      if candidate not in self.ignoredLineNumbers:
-        return candidate
-    raise Exception("Failed to identify interesting line number for stack " + str(stack))
-
-
-  def extractStack(self):
-    return traceback.extract_stack()
-
-  def extract_lineNumbers(self):
-    stack = self.extractStack()
-    lineNumbers = [self.extract_lineNumber(line) for line in stack]
-    return lineNumbers
-
-  def extract_lineNumber(self, entry):
-    return entry[1]
+    frame = inspect.currentframe()
+    while frame is not None:
+      lineNumber = frame.f_lineno
+      if lineNumber not in self.ignoredLineNumbers:
+        del frame
+        return lineNumber
+      frame = frame.f_back
+    raise Exception("Failed to identify interesting line number in the above stack trace")
 
 externalStackInfo = ExternalStackInfo()
 
@@ -1950,7 +1943,6 @@ def equalityCheck():
 def suggestion():
   program = Program()
   program.put([
-    Print(Str("Loading 1/3...")),
     #some high-level ideas to try:
     #hardcoded prompts
       #recommend reading the logs
@@ -2076,6 +2068,7 @@ def suggestion():
       .func(Sig("offer", []), [
         Print(Concat([Str("If you can solve "), DotCall(SelfGet("prerequisite"), "toString")])),
         DotCall(SelfGet("fix"), "offer"),
+        Print(Concat([Str("This should solve "), DotCall(SelfGet("problem"), "toString")])),
       ]),
 
     #searches a list of solutions for a relevant solution
@@ -2200,7 +2193,6 @@ def suggestion():
 
 
     Var("solver", Call("makeSolver")),
-    Print(Str("Loading 2/3...")),
 
     #a query given to the user that the user is encouraged to respond to
     Class("Question")
