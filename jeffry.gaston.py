@@ -44,7 +44,7 @@ class ExternalStackInfo(object):
 
   def get_leaf_relevantLineNumber(self):
     #Return the number of the line closest to the leaf, excluding ignored lines
-    #Generall relevant while the Program is executing
+    #Generally relevant while the Program is executing
     stack = self.extractStack()
     for entry in reversed(stack):
       candidate = self.extract_lineNumber(entry)
@@ -157,6 +157,7 @@ class Program(object):
       ]),
       NativeClassDefinition("List", (lambda why: ListWrapper(why)), [
         NativeMethodDefinition("append", ["item"]),
+        NativeMethodDefinition("clear", []),
         NativeMethodDefinition("get", ["index"]),
         NativeMethodDefinition("tryGet", ["index"]),
         NativeMethodDefinition("removeAt", ["index"]),
@@ -393,6 +394,7 @@ class Execution(object):
     self.rootScope = Scope(self)
     self.rootScope.description = "global scope"
     self.scopes = [self.rootScope]
+    self.classScope = None
     self.statements = [statement for statement in program.statements]
     self.declareNativeClasses(program.nativeClasses)
     self.callStack = [None]
@@ -431,6 +433,12 @@ class Execution(object):
     scope = self.rootScope.newChild("scope at depth " + str(len(self.scopes)))
     self.addScope(scope)
     return self.getScope()
+
+  def setClassScope(self, classScope):
+    self.classScope = classScope
+
+  def getClassScope(self):
+    return self.classScope
 
   def addScope(self, newScope):
     self.scopes.append(newScope)
@@ -493,7 +501,9 @@ class Execution(object):
 
     #make any method definitions
     self.addScope(implementedInScope)
+    self.setClassScope(implementedInScope)
     self.runStatements(classDefinition.methodDefiners)
+    self.setClassScope(None)
     self.removeScope()
 
   def putLineNumber(self, justification):
@@ -504,12 +514,13 @@ class LogicStatement(object):
   def __init__(self):
     self.execution = None
     self.children = []
-    self.definitionScope = None
+    self.classDefinitionScope = None
     self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
     
   def beOwned(self, execution):
     self.execution = execution
-    self.definitionScope = execution.getScope()
+    if self.classDefinitionScope is None:
+      self.classDefinitionScope = execution.getClassScope()
 
   def getChildren(self):
     return self.children
@@ -963,11 +974,12 @@ class ValueProvider(object):
   def __init__(self):
     self.execution = None
     self.lineNumber = externalStackInfo.get_root_relevantLineNumber()
-    self.definitionScope = None
+    self.classDefinitionScope = None
     
   def beOwned(self, execution):
     self.execution = execution
-    self.definitionScope = execution.getScope()
+    if self.classDefinitionScope is None:
+      self.classDefinitionScope = execution.getClassScope()
 
   def process(self, justification):
     raise Exception("Invoked abstract method 'process' of ValueProvider")
@@ -1470,10 +1482,10 @@ class DefinedInClass_Scope(ValueProvider):
     super(DefinedInClass_Scope, self).__init__()
 
   def process(self, justification):
-    return JustifiedValue(self.definitionScope, UnknownJustification())
+    return JustifiedValue(self.classDefinitionScope, UnknownJustification())
 
   def __str__(self):
-    return str(self.definitionScope)
+    return str(self.classDefinitionScope)
 
 #returns the parent of the scope in which the current class is defined (so almost the parent's ClassDefinition)
 class SuperScope(DefinedInClass_Scope):
@@ -1481,10 +1493,10 @@ class SuperScope(DefinedInClass_Scope):
     super(SuperScope, self).__init__()
 
   def process(self, justification):
-    return JustifiedValue(self.definitionScope.parent, TextJustification("parent scope of " + str(self.definitionScope) + " is " + str(self.definitionScope.parent)))
+    return JustifiedValue(self.classDefinitionScope.parent, TextJustification("parent scope of " + str(self.classDefinitionScope) + " is " + str(self.classDefinitionScope.parent)))
 
   def __str__(self):
-    return str(self.definitionScope) + ".super"
+    return str(self.classDefinitionScope) + ".super"
 
 #returns the class scope for a given object
 class ClassFromObject_Scope(ValueProvider):
@@ -1541,7 +1553,7 @@ class DotCallImpl(LogicStatement):
     selfJustification = argumentInfos[0].justification
     numNonSelfParameters = len(argumentInfos) - 1
     text = "Evaluated " + str(self)
-    contextJustification = AndJustification(text, [callJustification, selfJustification] + argumentJustifications)
+    contextJustification = AndJustification(text, [callJustification, selfJustification, classScope_Justification] + argumentJustifications)
     contextJustification.logicLocation = self.lineNumber
     f = classScope.getFunction(self.methodName, contextJustification)
     result = self.execution.getScope().callFunction(f, argumentInfos, contextJustification)
@@ -1686,7 +1698,10 @@ class ListWrapper(NativeObject):
 
   def tryGet(self, callJustification, indexInfo):
     index = indexInfo.value.getNumber()
-    if index >= len(self.impl):
+    if index is None:
+      itemJustification = TextJustification("index is None")
+      item = None
+    elif index >= len(self.impl):
       itemJustification = TextJustification("index (" + str(index) + ") is past the end of " + str(self) + " (" + str(len(self.impl)) + ")")
       item = None
     else:
@@ -1705,6 +1720,8 @@ class ListWrapper(NativeObject):
     resultInfo = self.execution.getScope().newBoringObject("Num", [JustifiedValue(length, justification)], callJustification)
     return resultInfo
 
+  def clear(self, callJustification):
+    self.impl = []
     
   def toString(self, callJustification):
     tostringInfos = []
@@ -2100,7 +2117,6 @@ def suggestion():
               #found a solution for which the prerequisites are not met
               Var("childSolutions", SelfCall("getDoableSolutions", [Get("prereq"), Get("universe")])),
               ForEach("childSolution", Get("childSolutions"), [
-                AbstractException(),
                 DotCall(Get("doableSolutions"), "append", [Get("childSolution")]),
               ])
             ]),
@@ -2213,6 +2229,9 @@ def suggestion():
       ])
       .func(Sig("addQuestion", ["question"]), [
         DotCall(SelfGet("questions"), "append", [Get("question")]),
+      ])
+      .func(Sig("clear"), [
+        DotCall(SelfGet("questions"), "clear"),
       ])
       .func(Sig("getNextQuestion", []), [
         Return(DotCall(SelfGet("questions"), "tryGet", [Num(0)])),
@@ -2353,8 +2372,8 @@ def suggestion():
     #talks to the user, answers "why", forwards requests onto the Solver
     Class("Communicator")
       .vars({"universe": "Universe",
-          "question":"CompositeQuestion",
-          "username":"String"})
+        "question":"CompositeQuestion",
+        "username":"String"})
       .init([], [
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
@@ -2406,12 +2425,13 @@ def suggestion():
       .func(Sig("enterTextFact", ["key", "value"]), [
         DotCall(SelfGet("universe"), "putProp", [Get("key"), DotCall(Str("True"), "equals", [Get("value")])]),
       ])
-      .func(Sig("addQuestion", ["question"]), [
+      .func(Sig("setQuestion", ["question"]), [
+        DotCall(SelfGet("question"), "clear"),
         DotCall(SelfGet("question"), "addQuestion", [Get("question")]),
       ])
       .func(Sig("setUsername", ["username"]), [
         Print(Str("")),
-        Print(Concat([Str("Welcome, "), Get("username")])),
+        Print(Concat([Str("Hi, "), Get("username")])),
         SelfSet("username", Get("username")),
       ])
       .func(Sig("respondToHelp", ["text"]), [
@@ -2450,7 +2470,7 @@ def suggestion():
         ForEach("solution", DotGet(SelfGet("solver"), "solutions"), [
           DotCall(Get("question"), "addChoice", [DotCall(DotGet(Get("solution"), "problem"), "toString")]),
         ]),
-        SelfCall("addQuestion", [Get("question")]),
+        SelfCall("setQuestion", [Get("question")]),
       ])
       .func(Sig("solveProblem", ["queryText"]), [
         #help solve the user's external problem
@@ -2479,7 +2499,9 @@ def suggestion():
       .func(Sig("respondToFactEntry", []), [
         Print(Str("All right! What fact would you like to tell me?")),
         
-        SelfCall("addQuestion", [New("FactQuery", [Get("self")])]),
+        Var("question", New("FactQuery")),
+        DotSet(Get("question"), "communicator", Get("self")),
+        SelfCall("setQuestion", [Get("question")]),
       ])
       .func(Sig("respond", ["responseText"]), [
         Print(Str("")),
@@ -2504,7 +2526,7 @@ def suggestion():
                 If(DotCall(SelfGet("question"), "recognizesAnswer", [Get("responseText")])).then([
                   DotCall(SelfGet("question"), "answer", [Get("responseText")]),
                 ]).otherwise([
-                  Print(Str("""Sorry; my English isn't yet very good. Here is what I can understand:""")),
+                  Print(Str("""Sorry; I'm a robot and English is my second language.\nHere is what I can understand:""")),
                   SelfCall("showGenericHelp"),
                 ])
               ])
@@ -2513,18 +2535,23 @@ def suggestion():
         ])
       ])
       .func(Sig("talkOnce", []), [
-        Var("prompt", Const(None)),
+        Var("standardPrompt", Str("Say something! ")),
+        Var("prompt", Get("standardPrompt")),
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
           #the prompt here is made to look like a Bash ssh prompt since it's familiar to users and kind of cute - we're not actually ssh'd into anything
-          If(DotCall(Str(""), "equals", [SelfGet("username")])).then([
-            Set("prompt", Str("whybot $ ")),
-          ]).otherwise([
-            Set("prompt", Concat([SelfGet("username"), Str("@"), Str("whybot $ ")]))
-          ])
+          #Set("prompt", Str("Say something! ")),
+          #If(DotCall(Str(""), "equals", [SelfGet("username")])).then([
+          #  Set("prompt", Str("Say something! ")),
+          #]).otherwise([
+          #  #Set("prompt", Concat([SelfGet("username"), Str("@"), Str("whybot $ ")]))
+          #])
         ]).otherwise([
-          Set("prompt", Concat([DotCall(SelfGet("question"), "getQueryText"), Str("\nAlternatively, enter any standard menu option including 'help' for help")])),
+          Set("prompt", Concat([DotCall(SelfGet("question"), "getQueryText"),
+            Str("\nAlternatively, enter any standard menu option including 'help' for help.\n"),
+            Get("standardPrompt")])),
         ]),
         Var("response", Ask(Get("prompt"))),
+        Print(Str("Um...")),
         DotCall(Get("self"), "respond", [Get("response")]),
       ])
       .func(Sig("communicate", []), [
