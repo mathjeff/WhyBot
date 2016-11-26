@@ -7,6 +7,7 @@ import inspect
 import subprocess
 import traceback
 import sys
+import collections
 
 #############################################################################################################################################################################################
 #For determining where in this file (jeffry.gaston.py) we are
@@ -818,7 +819,10 @@ class Justification(object):
     return results
 
   def describeWithId(self):
-    return "- (#" + str(self.justificationId) + ") " + self.describe()
+    return self.getIdText() + self.describe()
+
+  def getIdText(self):
+    return "- (#" + str(self.justificationId) + ") "
 
   def explainOneLevel(self):
     description = self.describeWithId()
@@ -1236,7 +1240,7 @@ class WithId(ValueProvider):
 
   def process(self, callJustification):
     info = self.itemProvider.process(callJustification)
-    description = info.justification.describeWithId()
+    description = info.justification.getIdText() + str(info.value)
     return self.execution.getScope().newBoringObject("String", [JustifiedValue(description, info.justification)], callJustification)
 
   def getChildren(self):
@@ -1867,7 +1871,7 @@ class DictionaryWrapper(NativeObject):
   def __init__(self, callJustification):
     super(DictionaryWrapper, self).__init__()
     self.items = {}
-    self.keyInfos = {}
+    self.keyInfos = collections.OrderedDict()
 
   def getItems(self):
     #returns List<TKey, JustifiedValue<TValue, Justification>>
@@ -2133,9 +2137,9 @@ def suggestion():
         ]))
       ])
       .func(Sig("offer", []), [
-        Print(Concat([Str("If you can solve "), DotCall(SelfGet("prerequisite"), "toString")])),
+        #Print(Concat([Str("If you can solve '"), DotCall(SelfGet("prerequisite"), "toString"), Str("':")])),
         DotCall(SelfGet("fix"), "offer"),
-        Print(Concat([Str("This should solve "), DotCall(SelfGet("problem"), "toString")])),
+        #Print(Concat([Str("This should solve "), DotCall(SelfGet("problem"), "toString")])),
       ])
       .func(Sig("execute", []), [
         DotCall(SelfGet("fix"), "execute"),
@@ -2196,16 +2200,16 @@ def suggestion():
       Var("solver", New("Solver")),
 
       #prerequisites of solutions
-      Var("xWorks", New("TextProposition", [Str("It works")])),
-      Var("didYouFindHelp", New("TextProposition", [Str("Find a knowledgeable entity")])),
-      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("Understand the problem")])),
-      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("Find helpful logs")])),
+      Var("xWorks", New("TextProposition", [Str("I need my software to work")])),
+      Var("didYouFindHelp", New("TextProposition", [Str("I need to find a knowledgeable entity")])),
+      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("I need to understand the problem")])),
+      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("I need helpful logs")])),
       Var("canYouFindAnyLogs", New("TextProposition", [Str("Find logs")])),
       Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Find a version that works")])),
       Var("canYouAffordToWait", New("TextProposition", [Str("Afford to wait")])),
-      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("Have clear code")])),
+      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("I need to have clear code")])),
       Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Have any code")])),
-      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("Understand the code")])),
+      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("I need to understand the code")])),
       Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Have an instant messenger")])),
       Var("doYouHaveInternet", New("TextProposition", [Str("Have internet access")])),
       
@@ -2430,7 +2434,7 @@ def suggestion():
         Var("result", Concat([SelfGet("header"), Str("\nChoose one of these "), DotCall(Get("length"), "toString"), Str(" choices\n")])),
         For("i", Num(0), Get("length"), [
           Var("choice", DotCall(SelfGet("choices"), "get", [Get("i")])),
-          Set("result", Concat([Get("result"), DotCall(Get("i"), "toString"), Str(" "), DotCall(Get("choice"), "toString"), Str("\n")])),
+          Set("result", Concat([Get("result"), DotCall(Get("i"), "toString"), Str(": "), DotCall(Get("choice"), "toString"), Str("\n")])),
         ]),
         Return(Get("result")),
       ])
@@ -2442,7 +2446,7 @@ def suggestion():
       .inherit("MultipleChoiceQuestion")
       .init([], [
         SuperCall("__init__"),
-        SelfSet("header", Str("These are the problems I can solve!")),
+        SelfSet("header", Str("These are the problems I can solve!\n")),
       ])
       .func(Sig("choseChoice", ["choiceText"]), [
         DotCall(SelfGet("communicator"), "solveProblem", [Get("choiceText")]),
@@ -2453,7 +2457,7 @@ def suggestion():
       .vars({"acceptText":"String", "rejectText":"String", "solutions":"List<Solution>"})
       .init(["solutions"], [
         SuperCall("__init__"),
-        SelfSet("header", Str("Would you like to accept or reject any of these choices?")),
+        SelfSet("header", Str("Please choose whether to accept (execute) or to reject (mark as not feasible) one of these solutions\n")),
 
         SelfSet("acceptText", Str("Accept")),
         SelfCall("addChoice", [SelfGet("acceptText")]),
@@ -2497,17 +2501,24 @@ def suggestion():
         """))
       ])
       .func(Sig("showJustificationHelp", []), [
-         Print(Str("\nSome of my statements will have numbers in parentheses and brackets to the left, like this:\n")),
+         Print(Str("\nSome of my statements will have numbers in parentheses to the left, like this:")),
          PrintWithId(Str("Tada!")),
-         Print(Str("The format of this text is:\n")),
-         Print(Str("- (whyId) [lines lineA/lineB]: text\n")),
-         Print(Str("See <lineA> for the low-level implementation of this value")),
-         Print(Str("See <lineB> for the high-level implementation of this value")),
-         Print(Str("Type 'y <whyId>' to list supporting statements\n")),
+         Print(Str("\nThe format of this output is:")),
+         Print(Str("- (#<whyId>): <text>")),
+         Print(Str("\nType 'y <whyId>' to list statements that support statement number <whyId>")),
+         Print(Str("")),
+         Print(Str("The result wil be some output that looks like this:\n")),
+         ShortExplain(Str("Tadaa!"), Const(1)),
+         Print(Str("")),
+         Print(Str("The format of each of these lines is:\n")),
+         Print(Str("- (#<whyId>) [lines <lineA>/<lineB>]: <text>\n")),
+         Print(Str("See line number <lineA> in my source code for the corresponding low-level implementation")),
+         Print(Str("See line number <lineB> in my source code for the corresponding high-level implementation")),
+         Print(Str("Type 'y <whyId>' for these statements too to list statements that support them\n")),
       ])
       .func(Sig("showSolveHelp", []), [
          Print(Str("""
-         Ask me a question and I might be able to solve it!
+         Type 'solve' and I will ask you what problem you would like to have solved
          """))
       ])
       .func(Sig("showClearHelp", []), [
@@ -2517,7 +2528,8 @@ def suggestion():
       ])
       .func(Sig("showNevermindHelp", []), [
          Print(Str("""
-         Type 'nvm' and I will cancel my current question for you
+         Type 'nvm' and I will cancel my current question
+         If I have a current question, then I repeat the question everytime I show the prompt
          """))
       ])
       .func(Sig("showSarcasticHelpHelp", []), [
@@ -2541,7 +2553,8 @@ def suggestion():
       ])
       .func(Sig("setUsername", ["username"]), [
         Print(Str("")),
-        Print(Concat([Str("Hi, "), Get("username")])),
+        #Print(Concat([Str("Hi, "), Get("username")])),
+        #Print(Str("Hi")),
         SelfSet("username", Get("username")),
       ])
       .func(Sig("respondToClear"), [
@@ -2554,7 +2567,7 @@ def suggestion():
         If(Not(DotCall(Str("Cancel"), "equals", [Get("choiceText")]))).then([
           If(DotCall(DotCall(Get("solutions"), "getLength"), "equals", [Num(1)])).then([
             Var("s1", DotCall(Get("solutions"), "get", [Num(0)])),
-            SelfCall("respondToSolutionSelection", [Str("choiceText") , Get("s1")]),
+            SelfCall("respondToSolutionSelection", [Get("choiceText") , Get("s1")]),
           ]).otherwise([
             Var("question", New("SelectSolution_Query", [Get("solutions"), Get("choiceText")])),
             DotSet(Get("question"), "communicator", Get("self")),
@@ -2564,10 +2577,10 @@ def suggestion():
       ])
       .func(Sig("respondToSolutionSelection", ["acceptOrReject", "solution"]), [
         If(DotCall(Str("Accept"), "equals", [Get("acceptOrReject")])).then([
-          DotCall(Get("solution"), "execute")
+          DotCall(Get("solution"), "execute"),
         ]).otherwise([
           Var("rejected", DotCall(DotGet(Get("solution"), "prerequisite"), "toString")),
-          Print(Concat([Str("Rejecting "), Get("rejected")])),   
+          Print(Concat([Str("Marking as infeasible '"), Get("rejected"), Str("'")])),
           SelfCall("enterTextFact", [Get("rejected"), Str("False")]),
         ])
       ])
@@ -2593,8 +2606,8 @@ def suggestion():
                   ]).otherwise([
                     Print(Str("""Sorry; I don't recognize that keyword. Here is what I can understand:"""))
                   ]),
+                  SelfCall("showGenericHelp"),
                 ]),
-                SelfCall("showGenericHelp"),
               ])
             ])
           ])
@@ -2622,9 +2635,10 @@ def suggestion():
         #help solve the user's external problem
         Var("problem1", New("TextProposition", [Get("queryText")])),
         Var("universe", SelfGet("universe")),
-        Print(Str("Possible solutions:")),
         Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
-        If(DotCall(Num(0), "equals", [DotCall(Get("solutions"), "getLength")])).then([
+        Var("numSolutions", DotCall(Get("solutions"), "getLength")),
+        Print(Concat([DotCall(Get("numSolutions"), "toString"), Str(" possible solutions found:")])),
+        If(DotCall(Num(0), "equals", [Get("numSolutions")])).then([
           Print(Str("Sorry, I don't have any more solutions to that problem.")),
         ]).otherwise([
           Print(Str("")),
@@ -2632,8 +2646,9 @@ def suggestion():
           DotSet(Get("question"), "communicator", Get("self")),
           ForEach("solution", Get("solutions"), [
             DotCall(Get("solution"), "offer"),
-            Print(Str("")),
+            #Print(Str("")),
           ]),
+          Print(Str("")),
           SelfCall("setQuestion", [Get("question")]),
         ])
       ])
@@ -2677,7 +2692,7 @@ def suggestion():
                   If(DotCall(SelfGet("question"), "recognizesAnswer", [Get("responseText")])).then([
                     DotCall(SelfGet("question"), "answer", [Get("responseText")]),
                   ]).otherwise([
-                    Print(Str("""Sorry; I'm a robot, and English is my second language. Type 'help' for help.""")),
+                    Print(Str("""Sorry; I'm a robot, and English is only my second language. Type 'help' for help.""")),
                   ])
                 ])
               ])
