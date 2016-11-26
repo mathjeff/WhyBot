@@ -172,6 +172,7 @@ class Program(object):
         NativeMethodDefinition("toString", []),
         NativeMethodDefinition("nonEmpty", []),
         NativeMethodDefinition("equals", ["other"]),
+        NativeMethodDefinition("plus", ["other"]),
       ]),
     ]
     
@@ -421,7 +422,7 @@ class Execution(object):
     statement.beOwned(self)
     for child in statement.getChildren():
       if not hasattr(child, "beOwned"):
-        raise Exception("Invalid child statement " + str(child) + " of class " + str(child.__class__) + " is of invalid class (does not implement beOwned) to be assigned to parent statement " + str(statement))
+        raise Exception("Invalid child statement " + str(child) + " of class " + str(child.__class__) + " is of invalid class (does not implement beOwned) to be assigned to parent statement " + str(statement) + " at line " + str(statement.lineNumber))
       self.ownStatement(child)
 
   def getScope(self):
@@ -1928,8 +1929,14 @@ class NumberWrapper(NativeObject):
   def equals(self, callJustification, otherInfo):
     other = otherInfo.value
     resultBool = self.getNumber() == other.getNumber()
-    justification = AndJustification(str(self.getNumber()) + " == " + str(other.getNumber()), [self.numberInfo.justification, otherInfo.justification])
+    justification = AndJustification(str(self.getNumber()) + " ?= " + str(other.getNumber()), [self.numberInfo.justification, otherInfo.justification])
     return self.managedObject.execution.getScope().newBoringObject("Bool", [JustifiedValue(resultBool, justification)], callJustification)
+
+  def plus(self, callJustification, otherInfo):
+    other = otherInfo.value
+    resultNum = self.getNumber() + other.getNumber()
+    justification = AndJustification(str(self.getNumber()) + " + " + str(other.getNumber()) + " = " + str(resultNum), [self.numberInfo.justification, otherInfo.justification])
+    return self.managedObject.execution.getScope().newBoringObject("Num", [JustifiedValue(resultNum,justification)], callJustification)
 
   def toString(self, callJustification):
     outputString = str(self.numberInfo.value)
@@ -2145,6 +2152,14 @@ def suggestion():
         DotCall(SelfGet("fix"), "execute"),
       ]),
 
+    Class("ActionAndSolution")
+      .vars({"action":"Action", "solution":"Solution"})
+      .init(["action", "solution"], [
+      ])
+      .func(Sig("toString"), [
+        Return(Concat([DotCall(SelfGet("action"), "toString"), Str(" '"), DotCall(DotGet(SelfGet("solution"), "fix"), "toString"), Str("'")])),
+      ]),
+
     #searches a list of solutions for a relevant solution
     Class("Solver")
       .vars({"solutions":"Map<String, List<Solution>>"})
@@ -2200,28 +2215,29 @@ def suggestion():
       Var("solver", New("Solver")),
 
       #prerequisites of solutions
-      Var("xWorks", New("TextProposition", [Str("I need my software to work")])),
-      Var("didYouFindHelp", New("TextProposition", [Str("I need to find a knowledgeable entity")])),
-      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("I need to understand the problem")])),
-      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("I need helpful logs")])),
+      Var("xWorks", New("TextProposition", [Str("My software doesn't work")])),
+      Var("doYouUnderstandTheProblem", New("TextProposition", [Str("I don't understand the problem with the software")])),
+      Var("didYouFindHelp", New("TextProposition", [Str("I can't find anyone to help me")])),
+      Var("didYouFindHelpfulLogs", New("TextProposition", [Str("I don't have helpful logs")])),
+      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("I don't have clear code")])),
+      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("I don't understand the code")])),
+
       Var("canYouFindAnyLogs", New("TextProposition", [Str("Find logs")])),
       Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Find a version that works")])),
       Var("canYouAffordToWait", New("TextProposition", [Str("Afford to wait")])),
-      Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("I need to have clear code")])),
       Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Have any code")])),
-      Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("I need to understand the code")])),
       Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Have an instant messenger")])),
       Var("doYouHaveInternet", New("TextProposition", [Str("Have internet access")])),
       
       #fixes
-      Var("askForHelp", New("TextAction", [Str("Ask a knowledgeable entity for help.")])),
+      Var("askForHelp", New("TextAction", [Str("Ask a helpful person for help.")])),
       Var("justSolveIt", New("TextAction", [Str("Use your knowledge of the problem to solve it.")])),
       Var("readTheLogs", New("TextAction", [Str("Read the logs.")])),
       Var("haveMeAnalyzeTheLogs", New("TextAction", [Str("Have me analyze the logs (this isn't implemented yet).")])),
       Var("diffThem", New("TextAction", [Str("Look for differences using the bash command `diff -r directory1 directory2`.")])),
       Var("waitUntilYouFeelRefreshed", New("TextAction", [Str("Take a break and return with a possibly fresh perspective.")])),
       Var("waitUntilItHappensAgain", New("TextAction", [Str("Wait for the problem to happen again, at which point you might be more able to notice a pattern.")])),
-      Var("rerunTheProgram", New("TextAction", [Str("Run the program again.")])),
+      Var("rerunTheImprovedProgram", New("TextAction", [Str("Improve the program and run the program again.")])),
       Var("improveTheSourceCode", New("TextAction", [Str("Improve the source code.")])),
       Var("readTheSourceCode", New("TextAction", [Str("Read the source code.")])),
       Var("readTheInstantMessengerNames", New("TextAction", [Str("Look at the names in the instant messenger.")])),
@@ -2247,7 +2263,7 @@ def suggestion():
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouUnderstandTheProblem"), Get("canYouAffordToWait"), Get("waitUntilItHappensAgain")])]),
 
       #You can have clear logs if you have good source code and rerun the program
-      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("didYouFindHelpfulLogs"), Get("doYouHaveGoodSourceCode"), Get("rerunTheProgram")])]),
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("didYouFindHelpfulLogs"), Get("doYouHaveGoodSourceCode"), Get("rerunTheImprovedProgram")])]),
 
       #You can have good source code if you understand the source code and you improve the source code
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouHaveGoodSourceCode"), Get("doYouUnderstandTheSourceCode"), Get("improveTheSourceCode")])]),
@@ -2395,16 +2411,23 @@ def suggestion():
 
     Class("MultipleChoiceQuestion")
       .inherit("Question")
-      .vars({"choices":"List<String>",
+      .vars({"choiceDisplays":"List<List<Object>>",
+             "choiceValues":"List<Object>",
              "satisfied":"Bool",
              "header":"String"})
       .init([], [
         SelfSet("satisfied", Bool(False)),
-        SelfSet("choices", New("List")),
+        SelfSet("choiceDisplays", New("List")),
+        SelfSet("choiceValues", New("List")),
+        SelfCall("addDivider"),
         SelfSet("header", Str("")),
       ])
       .func(Sig("addChoice", ["choice"]), [
-        DotCall(SelfGet("choices"), "append", [Get("choice")]),
+        DotCall(SelfGet("choiceValues"), "append", [Get("choice")]),
+        DotCall(DotCall(SelfGet("choiceDisplays"), "get", [Num(-1)]), "append", [Get("choice")]),
+      ])
+      .func(Sig("addDivider", []), [
+        DotCall(SelfGet("choiceDisplays"), "append", [New("List")]),
       ])
       .func(Sig("addChoices", ["choices"]), [
         ForEach("choice", Get("choices"), [
@@ -2415,7 +2438,7 @@ def suggestion():
         Var("intChoice", Int(Get("indexText"))),
         Var("result", Bool(False)),
         If(Not(IsNone(Get("intChoice")))).then([
-          Set("result", DotCall(SelfGet("choices"), "tryGet", [Get("intChoice")])),
+          Set("result", DotCall(SelfGet("choiceValues"), "tryGet", [Get("intChoice")])),
         ]),
         Return(Get("result")),
       ])
@@ -2430,12 +2453,16 @@ def suggestion():
         AbstractException(),  
       ])
       .func(Sig("getQueryText", []), [
-        Var("length", DotCall(SelfGet("choices"), "getLength")),
-        Var("result", Concat([SelfGet("header"), Str("\nChoose one of these "), DotCall(Get("length"), "toString"), Str(" choices\n")])),
-        For("i", Num(0), Get("length"), [
-          Var("choice", DotCall(SelfGet("choices"), "get", [Get("i")])),
-          Set("result", Concat([Get("result"), DotCall(Get("i"), "toString"), Str(": "), DotCall(Get("choice"), "toString"), Str("\n")])),
+        Var("content", Str("")),
+        Var("count", Num(0)),
+        ForEach("group", SelfGet("choiceDisplays"), [
+          ForEach("choice", Get("group"), [
+            Set("content", Concat([Get("content"), DotCall(Get("count"), "toString"), Str(": "), DotCall(Get("choice"), "toString"), Str("\n")])),
+            Set("count", DotCall(Get("count"), "plus", [Num(1)])),
+          ]),
+          Set("content", Concat([Get("content"), Str("\n")])),
         ]),
+        Var("result", Concat([SelfGet("header"), Str("\nChoose one of these "), DotCall(Get("count"), "toString"), Str(" choices\n"), Get("content")])),
         Return(Get("result")),
       ])
       .func(Sig("isSatisfied", []), [
@@ -2478,6 +2505,15 @@ def suggestion():
       ])
       .func(Sig("choseChoice", ["choice"]), [
         DotCall(SelfGet("communicator"), "respondToSolutionSelection", [SelfGet("action"), Get("choice")]),
+      ]),
+      
+
+    Class("Select_SolutionAndAction_Query")
+      .inherit("MultipleChoiceQuestion")
+      .func(Sig("choseChoice", ["choice"]), [
+        Var("solution", DotGet(Get("choice"), "solution")),
+        Var("action", DotGet(Get("choice"), "action")),
+        DotCall(SelfGet("communicator"), "respondToSolutionSelection", [Get("action"), Get("solution")]),
       ]),
       
              
@@ -2563,25 +2599,51 @@ def suggestion():
       .func(Sig("respondToNevermind"), [
         DotCall(SelfGet("question"), "clear"),
       ])
-      .func(Sig("respondToSolutionAction", ["solutions", "choiceText"]), [
-        If(Not(DotCall(Str("Cancel"), "equals", [Get("choiceText")]))).then([
-          If(DotCall(DotCall(Get("solutions"), "getLength"), "equals", [Num(1)])).then([
-            Var("s1", DotCall(Get("solutions"), "get", [Num(0)])),
-            SelfCall("respondToSolutionSelection", [Get("choiceText") , Get("s1")]),
-          ]).otherwise([
-            Var("question", New("SelectSolution_Query", [Get("solutions"), Get("choiceText")])),
-            DotSet(Get("question"), "communicator", Get("self")),
-            SelfCall("setQuestion", [Get("question")]),
-          ])
+      .func(Sig("respondToSolve", []), [
+        Var("question", New("SolveProblem_Query")),
+        DotSet(Get("question"), "communicator", Get("self")),
+        ForEach("problemText", DotGet(SelfGet("solver"), "solutions"), [
+          DotCall(Get("question"), "addChoice", [Get("problemText")]),
         ]),
+        SelfCall("setQuestion", [Get("question")]),
+      ])
+      .func(Sig("solveProblem", ["queryText"]), [
+        #help solve the user's external problem
+        Var("problem1", New("TextProposition", [Get("queryText")])),
+        Var("universe", SelfGet("universe")),
+        Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
+        Var("numSolutions", DotCall(Get("solutions"), "getLength")),
+        Print(Concat([DotCall(Get("numSolutions"), "toString"), Str(" possible solutions found:")])),
+        If(DotCall(Num(0), "equals", [Get("numSolutions")])).then([
+          Print(Str("Sorry, I don't have any more solutions to that problem.")),
+        ]).otherwise([
+          SelfCall("showSolutionOptions", [Get("solutions")]),
+        ])
+      ])
+      .func(Sig("showSolutionOptions", ["solutions"]), [
+        Var("choices", New("List")),
+        Var("actions", New("List")),
+        DotCall(Get("actions"), "append", [Str("Activate")]),
+        #DotCall(Get("actions"), "append", [Str("Skip")]),
+        DotCall(Get("actions"), "append", [Str("Help with")]),
+        Var("question", New("Select_SolutionAndAction_Query")),
+        ForEach("solution", Get("solutions"), [
+          ForEach("action", Get("actions"), [
+            DotCall(Get("question"), "addChoice", [New("ActionAndSolution", [Get("action"), Get("solution")])]),
+          ]),
+          DotCall(Get("question"), "addDivider"),
+        ]),
+        DotSet(Get("question"), "communicator", Get("self")),
+        SelfCall("setQuestion", [Get("question")]),
       ])
       .func(Sig("respondToSolutionSelection", ["acceptOrReject", "solution"]), [
-        If(DotCall(Str("Accept"), "equals", [Get("acceptOrReject")])).then([
+        If(DotCall(Str("Activate"), "equals", [Get("acceptOrReject")])).then([
           DotCall(Get("solution"), "execute"),
         ]).otherwise([
           Var("rejected", DotCall(DotGet(Get("solution"), "prerequisite"), "toString")),
-          Print(Concat([Str("Marking as infeasible '"), Get("rejected"), Str("'")])),
-          SelfCall("enterTextFact", [Get("rejected"), Str("False")]),
+          #Print(Concat([Str("Marking as infeasible '"), Get("rejected"), Str("'")])),
+          #SelfCall("enterTextFact", [Get("rejected"), Str("False")]),
+          SelfCall("solveProblem", [Get("rejected")]),
         ])
       ])
       .func(Sig("respondToHelp", ["text"]), [
@@ -2622,35 +2684,6 @@ def suggestion():
         ]).otherwise([
           SelfCall("showJustificationHelp")
         ]),
-      ])
-      .func(Sig("respondToSolve", []), [
-        Var("question", New("SolveProblem_Query")),
-        DotSet(Get("question"), "communicator", Get("self")),
-        ForEach("problemText", DotGet(SelfGet("solver"), "solutions"), [
-          DotCall(Get("question"), "addChoice", [Get("problemText")]),
-        ]),
-        SelfCall("setQuestion", [Get("question")]),
-      ])
-      .func(Sig("solveProblem", ["queryText"]), [
-        #help solve the user's external problem
-        Var("problem1", New("TextProposition", [Get("queryText")])),
-        Var("universe", SelfGet("universe")),
-        Var("solutions", DotCall(Get("solver"), "trySolve", [Get("problem1"), Get("universe")])),
-        Var("numSolutions", DotCall(Get("solutions"), "getLength")),
-        Print(Concat([DotCall(Get("numSolutions"), "toString"), Str(" possible solutions found:")])),
-        If(DotCall(Num(0), "equals", [Get("numSolutions")])).then([
-          Print(Str("Sorry, I don't have any more solutions to that problem.")),
-        ]).otherwise([
-          Print(Str("")),
-          Var("question", New("AcceptOrReject_Query", [Get("solutions")])),
-          DotSet(Get("question"), "communicator", Get("self")),
-          ForEach("solution", Get("solutions"), [
-            DotCall(Get("solution"), "offer"),
-            #Print(Str("")),
-          ]),
-          Print(Str("")),
-          SelfCall("setQuestion", [Get("question")]),
-        ])
       ])
       .func(Sig("respondToAnswer", ["answerText"]), [
         If(DotCall(SelfGet("question"), "isSatisfied")).then([
