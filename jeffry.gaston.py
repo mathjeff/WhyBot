@@ -1,3 +1,10 @@
+#!python
+
+# Hi, I am WhyBot. You can ask me 'why'.
+# These are my skills:
+
+# 1. I can help debug software.
+
 # Sorry about writing this program in Python instead of a language supporting static typing such as C#, Java or Groovy
 # I wanted this program to be trivially easy to download, run, edit, and rerun, rather than just fairly easy
 # Hopefully I'll rewrite this program in another language eventually
@@ -2012,7 +2019,7 @@ class Shell(ValueProvider):
     commandText = commandInfo.value.getText()
     script = ShellScript(commandText)
     script.process()
-    output = script.output.strip()
+    output = script.output
     justification = AndJustification(str("shell command '" + str(commandText) + "' gave response = '" + str(output) + "'"), [callJustification])
 
     resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(str(output), justification)], commandInfo.justification)
@@ -2633,16 +2640,11 @@ def suggestion():
     #talks to the user, answers "why", forwards requests onto the Solver
     Class("Communicator")
       .vars({"universe": "Universe",
-        "question":"CompositeQuestion",
-        "username":"String"})
+        "question":"CompositeQuestion"})
       .init([], [
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
-        SelfCall("setUsername", [Str("jeff")]),
-        Print(Str("Hi, I am WhyBot. You can ask me 'why'.")),
-        Print(Str("These are my skills:")),
-        Print(Str("")),
-        Print(Str("1. I can help debug software.")),
+        Print(DotCall(Shell(Str("head -n 6 jeffry.gaston.py | tail -n 5")), "replace", [Str("# "), Str("")])),
       ])
       .func(Sig("showGenericHelp", []), [
         Print(Str("""
