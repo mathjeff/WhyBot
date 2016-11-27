@@ -2743,8 +2743,19 @@ def suggestion():
         SelfSet("question", New("CompositeQuestion")),
         SelfCall("greet"),
       ])
-      .func(Sig("greet"), [
+      .func(Sig("isModified"), [
+        Return(DotCall(Shell(Str("git status | grep modified | grep whyBot.py > /dev/null && echo -n ok")), "equals", [Str("ok")])),
+      ])
+      .func(Sig("displayGreetingLocatedInTopOfThisFile"), [
         Print(DotCall(Shell(Str("head -n 6 whyBot.py | tail -n 5")), "replace", [Str("# "), Str("")])),
+      ])
+      .func(Sig("greet"), [
+        If(SelfCall("isModified")).then([
+          Print(Str("")),
+          PrintWithId(Str("Hey - congratulations on having modified me. That's initiative, and that's how code gets improved. Good job!")),
+        ]).otherwise([
+          SelfCall("displayGreetingLocatedInTopOfThisFile"),
+        ])
       ])
       .func(Sig("showGenericHelp", []), [
         Print(Str("""
