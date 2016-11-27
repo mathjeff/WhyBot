@@ -15,6 +15,9 @@ import subprocess
 import traceback
 import sys
 import collections
+import os
+
+thePathOfThisFile = os.path.abspath(os.path.join(os.getcwd(), sys.argv[0]))
 
 #############################################################################################################################################################################################
 #For determining where in this file (jeffry.gaston.py) we are
@@ -1225,9 +1228,88 @@ class IsNone(ValueProvider):
   def __str__(self):
     return "(" + str(self.provider) + " == None)"
 
+#os.path.dirname
+class Dirname(ValueProvider):
+  def __init__(self, valueProvider):
+    super(Dirname, self).__init__()
+    self.valueProvider = valueProvider
+      
+
+  def process(self, callJustification):
+    subInfo = self.valueProvider.process(callJustification)
+    resultValue = os.path.dirname(subInfo.value.getText())
+    resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(resultValue, subInfo.justification)], callJustification)
+
+    return resultInfo
+
+  def getChildren(self):
+    return [self.valueProvider]
+
+  def __str__(self):
+    return "dirname(" + str(self.valueProvider) + ")"
+
+#os.path.basename
+class Basename(ValueProvider):
+  def __init__(self, valueProvider):
+    super(Basename, self).__init__()
+    self.valueProvider = valueProvider
+      
+
+  def process(self, callJustification):
+    subInfo = self.valueProvider.process(callJustification)
+    resultValue = os.path.basename(subInfo.value.getText())
+    resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(resultValue, subInfo.justification)], callJustification)
+    return resultInfo
+
+  def getChildren(self):
+    return [self.valueProvider]
+
+  def __str__(self):
+    return "basename(" + str(self.valueProvider) + ")"
+
+#os.path.join
+class PathJoin(ValueProvider):
+  def __init__(self, leftProvider, rightProvider):
+    super(PathJoin, self).__init__()
+    self.leftProvider = leftProvider
+    self.rightProvider = rightProvider
+
+  def process(self, callJustification):
+    leftInfo = self.leftProvider.process(callJustification)
+    rightInfo = self.rightProvider.process(callJustification)
+    resultValue = os.path.join(leftInfo.value.getText(), rightInfo.value.getText())
+    justification = AndJustification(str(self) + " = " + str(resultValue), [leftInfo.justification, rightInfo.justification])
+    resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(resultValue, justification)], callJustification)
+    return resultInfo
+
+  def getChildren(self):
+    return [self.leftProvider, self.rightProvider]
+
+  def __str__(self):
+    return "os.path.join(" + str(self.leftProvider) + ", " + str(self.rightProvider) + ")"
+
+#os.rename
+class Rename(LogicStatement):
+  def __init__(self, leftProvider, rightProvider):
+    super(Rename, self).__init__()
+    self.leftProvider = leftProvider
+    self.rightProvider = rightProvider
+
+  def process(self, callJustification):
+    leftInfo = self.leftProvider.process(callJustification)
+    rightInfo = self.rightProvider.process(callJustification)
+    os.rename(leftInfo.value.getText(), rightInfo.value.getText())
+    return JustifiedValue(None, UnknownJustification())
+
+  def getChildren(self):
+    return [self.leftProvider, self.rightProvider]
+
+  def __str__(self):
+    return "os.rename(" + str(self.leftProvider) + ", " + str(self.rightProvider) + ")"
+
 
 #############################################################################################################################################################################################
-#gets a variable from the current scope
+#addition
 class Plus(ValueProvider):
   def __init__(self, valueProviders):
     super(Plus, self).__init__()
@@ -2078,6 +2160,18 @@ def suggestion():
         #when nothing goes right, go left
         #
 
+    Func(Sig("renameThisFile"), [
+      Var("thePathOfThisFile", Str(thePathOfThisFile)),
+      Var("theDirOfThisFile", Dirname(Get("thePathOfThisFile"))),
+      Var("theNameOfThisFile", Basename(Get("thePathOfThisFile"))),
+      Var("expectedName", Str("jeffry.gaston.py")),
+      If(Not(DotCall(Get("theNameOfThisFile"), "equals", [Get("expectedName")]))).then([
+        Var("expectedPath", PathJoin(Get("theDirOfThisFile"), Get("expectedName"))),
+        Rename(Get("thePathOfThisFile"), Get("expectedPath")),
+      ]),
+    ]),
+    Call("renameThisFile"),
+
     #a thing that can be done
     Class("Action")
       .func(Sig("getOfferText"), [
@@ -2644,6 +2738,9 @@ def suggestion():
       .init([], [
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
+        SelfCall("greet"),
+      ])
+      .func(Sig("greet"), [
         Print(DotCall(Shell(Str("head -n 6 jeffry.gaston.py | tail -n 5")), "replace", [Str("# "), Str("")])),
       ])
       .func(Sig("showGenericHelp", []), [
