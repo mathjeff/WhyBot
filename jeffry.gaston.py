@@ -73,8 +73,15 @@ class ShellScript(object):
     self.output = None
 
   def process(self):
-    self.output = subprocess.check_output([self.commandText], stdin=None, stderr=subprocess.PIPE, shell=True)
-    self.returnCode = 0
+    try:
+      self.returnCode = 0
+      self.output = subprocess.check_output(["bash", "-c", self.commandText], stdin=None, stderr=subprocess.PIPE, shell=True)
+    except subprocess.CalledProcessError as e:
+      self.output = e.output
+      self.returnCode = e.returncode
+    #logger.message("output = '" + str(self.output) + "'")
+    #logger.message("returnCode = " + str(self.returnCode))
+
 
 def simpleDebug():
   logger.message()
@@ -117,6 +124,8 @@ class PrintLogger(object):
       simpleDebug()
     sys.exit(1)
 
+logger = PrintLogger()
+
 class StringUtils(object):
   def __init__(self):
     return
@@ -147,6 +156,7 @@ class Program(object):
         NativeMethodDefinition("split", ["separator"]),
         NativeMethodDefinition("toString", []),
         NativeMethodDefinition("plus", ["other"]),
+        NativeMethodDefinition("replace", ["input", "output"]),
         NativeMethodDefinition("exceptPrefix", ["other"]),
         NativeMethodDefinition("equals", ["other"]),
       ]),
@@ -284,9 +294,9 @@ class Scope(object):
     else:
       scope = child.tryFindScope("return")
       if scope is None:
-        return JustifiedValue(None, TextJustification(str(f.functionName) + " did not reach any return statement"))
+        return JustifiedValue(None, AndJustification(str(f.functionName) + " did not reach any return statement", [calledChild_justification]))
       else:
-        return JustifiedValue(None, TextJustification(str(f.functionName) + " explicitly returned None"))
+        return JustifiedValue(None, AndJustification(str(f.functionName) + " explicitly returned None", [calledChild_justification]))
 
 
 
@@ -835,23 +845,8 @@ class Justification(object):
         description += "\n" + indent + line
     return description
 
-#justification of something that's only represented by text'
-class TextJustification(Justification):
-  def __init__(self, message):
-    super(TextJustification, self).__init__()
-    self.message = message
-
-  def describe(self):
-    return self.message
-
-#class for when we don't know the justification'
-class UnknownJustification(TextJustification):
-  def __init__(self):
-    super(UnknownJustification, self).__init__("""Idk.""")
-
 #justification of something caused by other things	
 class AndJustification(Justification):
-
   def __init__(self, description, justifications):
     super(AndJustification, self).__init__()
     self.description = description
@@ -865,6 +860,15 @@ class AndJustification(Justification):
     description += str(self.description)
     return description
 
+#justification of something that's only represented by text'
+class TextJustification(AndJustification):
+  def __init__(self, message):
+    super(TextJustification, self).__init__(message, [])
+
+#class for when we don't know the justification'
+class UnknownJustification(TextJustification):
+  def __init__(self):
+    super(UnknownJustification, self).__init__("""Idk.""")
   
 #says that two things are equal
 class EqualJustification(Justification):
@@ -1127,9 +1131,9 @@ class Eq(ValueProvider):
     matches = (value1 == value2)
     description = str(self.provider1)
     if matches:
-      description += "="
+      description += " = "
     else:
-      description += "!="
+      description += " != "
     description += str(self.provider2)
     justification1 = FullJustification(str(self.provider1), info1.value, self.lineNumber, callJustification, [info1.justification])
     justification2 = FullJustification(str(self.provider2), info2.value, self.lineNumber, callJustification, [info2.justification])
@@ -1167,6 +1171,29 @@ class Not(ValueProvider):
 
   def __str__(self):
     return "!(" + str(self.provider) + ")"
+
+#boolean 'or'
+class Or(ValueProvider):
+  def __init__(self, leftProvider, rightProvider):
+    super(Or, self).__init__()
+    self.leftProvider = leftProvider
+    self.rightProvider = rightProvider
+      
+
+  def process(self, callJustification):
+    leftInfo = self.leftProvider.process(callJustification)
+    rightInfo = self.rightProvider.process(callJustification)
+    resultValue = leftInfo.value.isTrue() or rightInfo.value.isTrue()
+    resultInfo = self.execution.getScope().newBoringObject("Bool", [JustifiedValue(resultValue, AndJustification(str(self) + " = " + str(resultValue)
+                                                           , [leftInfo.justification, rightInfo.justification]))], callJustification)
+
+    return resultInfo
+
+  def getChildren(self):
+    return [self.leftProvider, self.rightProvider]
+
+  def __str__(self):
+    return "(" + str(self.leftProvider) + " or " + str(self.rightProvider) + ")"
 
 #tells whether an Object is None
 class IsNone(ValueProvider):
@@ -1803,6 +1830,15 @@ class StringWrapper(NativeObject):
     resultInfo = self.managedObject.execution.getScope().newBoringObject("String", [JustifiedValue(text, justification)], callJustification)
     return resultInfo
 
+  def replace(self, callJustification, inputInfo, outputInfo):
+    inputValue = inputInfo.value.getText()
+    outputValue = outputInfo.value.getText()
+    resultValue = self.getText().replace(inputValue, outputValue)
+    justification = AndJustification('"' + str(self) + '".replace("' + str(inputValue) + "', '" + str(outputValue) + '" = "' + str(resultValue) + '"',
+                                     [callJustification, self.textInfo.justification, inputInfo.justification, outputInfo.justification])
+    resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(resultValue, justification)], callJustification)
+    return resultInfo
+
   def equals(self, callJustification, otherInfo):
     ourValue = self.getText()
     other = otherInfo.value
@@ -1966,104 +2002,133 @@ class AbstractException(InterpreterException):
 
 #############################################################################################################################################################################################
 #miscellaneous
-class JustifiedShell(ValueProvider):
+class Shell(ValueProvider):
   def __init__(self, commandText_provider):
+    super(Shell, self).__init__()
     self.commandText_provider = commandText_provider
 
-  def process(self, justification):
-    commandInfo = self.commandText_provider.process()
-    script = ShellScript(commandInfo.value)
+  def process(self, callJustification):
+    commandInfo = self.commandText_provider.process(callJustification)
+    commandText = commandInfo.value.getText()
+    script = ShellScript(commandText)
     script.process()
-    value = script.output.strip()
-    return JustifiedValue(value, AndJustification([EqualJustification('script provider', self.commandText_provider, UnknownJustification()),
-                                           EqualJustification('script command', commandInfo.value, commandInfo.justification), 
-                                           EqualJustification('script output', value, TextJustification("That is the result that the shell gave"))]))
+    output = script.output.strip()
+    justification = AndJustification(str("shell command '" + str(commandText) + "' gave response = '" + str(output) + "'"), [callJustification])
 
+    resultInfo = self.execution.getScope().newBoringObject("String", [JustifiedValue(str(output), justification)], commandInfo.justification)
+    return resultInfo
+
+  def getChildren(self):
+    return [self.commandText_provider]
+
+  def __str__(self):
+    return "shell: " + str(self.commandText_provider)
 
 def getModificationExpression():
-  return JustifiedShell(Str("stat --format %y jeffry.gaston.py  | grep -o 2016-10-05"))
+  return Shell(Str("stat --format %y jeffry.gaston.py  | grep -o 2016-10-05"))
 
 def get_currentHash_expression():
-  return JustifiedShell(Str("head -n `wc -l jeffry.gaston.py | sed 's/ .*//'` jeffry.gaston.py  | md5sum | sed 's/^/#/'"))
+  return Shell(Str("head -n `wc -l jeffry.gaston.py | sed 's/ .*//'` jeffry.gaston.py  | md5sum | sed 's/^/#/'"))
 
 def get_savedHash_expression():
-  return JustifiedShell(Str("tail -n 1 jeffry.gaston.py"))
+  return Shell(Str("tail -n 1 jeffry.gaston.py"))
 
 def make_fileModified_expression():
   return Eq(get_savedHash_expression(), get_currentHash_expression())
 
-logger = PrintLogger()
-
-def equalityCheck():
-  program = Program()
-  storage = program.storage
-  program.put([
-    Set(storage, "a", Str("one")),
-    Set(storage, "b", Str("two")),
-    If(Eq(Get("a"), Get("b"))).then(
-      Set(storage, "result", Str("equal")),
-      Set(storage, "result", Str("different"))
-    )
-  ])
-  program.run()
-  result = storage.getInfo("result")
-  logger.message()
-  logger.message("Program result value = " + str(result.value) + " because " + str(result.justification.explainRecursive()))
-
 def suggestion():
   program = Program()
   program.put([
-    #some high-level ideas to try:
-    #hardcoded prompts
-      #recommend reading the logs
-      #recommend googling it
-      #recommend asking someone for help
-      #recommend diff-filterer.py
-      #recommend `diff -r`
-      #recommend reading the source code
-      #recommend experimenting with edits to the source code
-      #recommend taking a break
-      #magic 8-ball
-        #the future's foggy now, try again later
+    #for debugging
+      #some high-level ideas to try:
+      #hardcoded prompts
+        #recommend reading the logs
+        #recommend googling it
+        #recommend asking someone for help
+        #recommend diff-filterer.py
+        #recommend `diff -r`
+        #recommend reading the source code
+        #recommend experimenting with edits to the source code
+        #recommend taking a break
+        #magic 8-ball
+          #the future's foggy now, try again later
 
-    #git log filename and suggest asking the author
-    #query the wiki
-    #make a new wiki page
-    #query jira
-    #query google
-    #query/update a new special-purpose database
-      #possibly a baysian filter telling who to ask based on words in the query
-    #try to parse the log and highlight some important text
-    #grep notes
-    #parse a log file and compare to the source code to describe what happened
-    
-    #some jokes
-      #reject "As a..."
-
+      #git log filename and suggest asking the author
+      #query the wiki
+      #make a new wiki page
+      #query jira
+      #query google
+      #query/update a new special-purpose database
+        #possibly a baysian filter telling who to ask based on words in the query
+      #try to parse the log and highlight some important text
+      #grep notes
+      #parse a log file and compare to the source code to describe what happened
+    #which problem should I work on?
+    #some entertainment
+      #generate poetry via a random Markhov chain using the comments in this file
+      #some jokes
+        #reject "As a..."
+        #when nothing goes right, go left
+        #
 
     #a thing that can be done
     Class("Action")
-      .func(Sig("offer", []), [
+      .func(Sig("getOfferText"), [
         AbstractException()
       ])
-      .func(Sig("execute", []), [
+      .func(Sig("execute"), [
         AbstractException()
+      ])
+      .func(Sig("offer"), [
+        PrintWithId(SelfCall("getOfferText")),
+      ])
+      .func(Sig("toString"), [
+        Return(SelfCall("getOfferText")),
       ]),
 
     #an Action that prints a message
     Class("TextAction")
+      .inherit("Action")
       .vars({"message": "string"})
       .init(["message"], [
       ])
-      .func(Sig("offer", []), [
-        PrintWithId(SelfGet("message")),
+      .func(Sig("getOfferText", []), [
+        Return(SelfGet("message")),
       ])
       .func(Sig("execute", []), [
         SelfCall("offer"),
-      ])
-      .func(Sig("toString", []), [
-        Return(SelfGet("message"))
       ]),
+
+    Func(Sig("searchGoogle", ["query"]), [
+      Print(Concat([Str("Searching Google for '"), Get("query"), Str("'")])),
+      Var("escaped", DotCall(Get("query"), "replace", [Str(" "), Str("%20")])),
+      Var("command", Concat([Str("chrome https://google.com/search?q="), Get("escaped")])),
+      Shell(Get("command")),
+    ]),
+
+    Class("SearchGoogle_Action")
+      .inherit("Action")
+      .func(Sig("getOfferText"), [
+        Return(Str("I can search google.com"))
+      ])
+      .func(Sig("execute"), [
+        Var("query", Ask(Str("Enter a query string:"))),
+        Call("searchGoogle", [Get("query")]),
+      ]),
+
+    Class("TestInternet_Action")
+      .inherit("Action")
+      .func(Sig("getOfferText"), [
+         Return(Str("I can test the internet connection")),
+      ])
+      .func(Sig("execute"), [
+        If(DotCall(Str("ok"), "equals", [Shell(Str("curl -f google.com > /dev/null 2>&1 && echo -n ok"))])).then([
+          PrintWithId(Str("The internet connection seems fine to me")),
+        ]).otherwise([
+          PrintWithId(Str("Yeah, the internet connection does seem problematic")),
+        ]),
+      ]),
+      
 
     Class("Universe")
       .vars({"props":"Map<string,string>"})
@@ -2129,18 +2194,25 @@ def suggestion():
 
     #a problem (Proposition whose value the user wants to be True) to be solved, a way to solve it (an Action to do), and a prerequisite (a Proposition whose value could be True) required before being able to solve it
     Class("Solution")
-      .vars({"problem":"Proposition", "prerequisite":"Proposition", "fix":"Action"})
-      .init(["problem", "prerequisite", "fix"], [      
+      .vars({"problem":"Proposition", "prerequisites":"List<Proposition>", "fix":"Action"})
+      .init(["problem", "prerequisite", "fix"], [
+        SelfSet("prerequisites", New("List")),
+        If(Not(IsNone(Get("prerequisite")))).then([
+          DotCall(SelfGet("prerequisites"), "append", [Get("prerequisite")]),
+        ]),
+      ])
+      .func(Sig("addPrerequisite", ["solution"]), [
+        DotCall(SelfGet("prerequisites"), "append", [Get("solution")]),
       ])
       .func(Sig("toString", []), [
         Return(Concat([
-          Str('If "'),
-          DotCall(SelfGet("prerequisite"), "toString"),
-          Str('" and "'),
+          #Str('If "'),
+          #DotCall(SelfGet("prerequisite"), "toString"),
+          #Str('" and "'),
           DotCall(SelfGet("fix"), "toString"),
-          Str('" then "'),
+          Str('" to fix "'),
           DotCall(SelfGet("problem"), "toString"),
-          Str('" should be all set.'),
+          #Str('" should be all set.'),
         ]))
       ])
       .func(Sig("offer", []), [
@@ -2190,21 +2262,24 @@ def suggestion():
         Var("relevantSolutions", SelfCall("getRelevantDirectSolutions", [Get("problem")])),
         Var("doableSolutions", New("List")),
         ForEach("candidateSolution", Get("relevantSolutions"), [
-          Var("prereq", DotGet(Get("candidateSolution"), "prerequisite")),
-          Var("prereqState", DotCall(Get("prereq"), "evaluate", [Get("universe")])),
-          If(IsNone(Get("prereqState"))).then([
-            #found a solution for which we don't know if the prerequisite is met
+          Var("feasible", Bool(True)),
+          ForEach("prereq", DotGet(Get("candidateSolution"), "prerequisites"), [
+            Var("prereqState", DotCall(Get("prereq"), "evaluate", [Get("universe")])),
+            If(Not(IsNone(Get("prereqState")))).then([
+              If(DotCall(Get("prereqState"), "equals", [Bool(False)])).then([
+                #a prerequisite for this solution is not met
+                Set("Feasible", Bool(False)),
+              ]),
+            ]),
+          ]),
+          If(Get("feasible")).then([
+            #found a solution for which we don't have any evidence that the prerequisites are not met
             DotCall(Get("doableSolutions"), "append", [Get("candidateSolution")]),
           ]).otherwise([
-            If(DotCall(Get("prereqState"), "equals", [Bool(True)])).then([
-              #found a solution whose prerequisite is met
-              DotCall(Get("doableSolutions"), "append", [Get("candidateSolution")]),
-            ]).otherwise([
-              #found a solution for which the prerequisites are not met
-              Var("childSolutions", SelfCall("getDoableSolutions", [Get("prereq"), Get("universe")])),
-              ForEach("childSolution", Get("childSolutions"), [
-                DotCall(Get("doableSolutions"), "append", [Get("childSolution")]),
-              ])
+            #found a solution for which the prerequisites are not met
+            Var("childSolutions", SelfCall("getDoableSolutions", [Get("prereq"), Get("universe")])),
+            ForEach("childSolution", Get("childSolutions"), [
+              DotCall(Get("doableSolutions"), "append", [Get("childSolution")]),
             ]),
           ]),
         ]),
@@ -2214,36 +2289,44 @@ def suggestion():
     Func(Sig("makeSolver", []), [
       Var("solver", New("Solver")),
 
-      #prerequisites of solutions
+      #problems
       Var("xWorks", New("TextProposition", [Str("My software doesn't work")])),
       Var("doYouUnderstandTheProblem", New("TextProposition", [Str("I don't understand the problem with the software")])),
       Var("didYouFindHelp", New("TextProposition", [Str("I can't find anyone to help me")])),
       Var("didYouFindHelpfulLogs", New("TextProposition", [Str("I don't have helpful logs")])),
       Var("doYouHaveGoodSourceCode", New("TextProposition", [Str("I don't have clear code")])),
       Var("doYouUnderstandTheSourceCode", New("TextProposition", [Str("I don't understand the code")])),
+      Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("I can't find a version of the software that works")])),
+      Var("doYouHaveAnySourceCode", New("TextProposition", [Str("I don't have any code")])),
+      Var("doYouHaveInternet", New("TextProposition", [Str("I don't have internet access")])),
+      Var("canYouFindAnyLogs", New("TextProposition", [Str("I can't find any logs")])),
+      Var("canYouAffordToWait", New("TextProposition", [Str("I can't afford to wait")])),
+      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("I don't have an instant messenger")])),
+      Var("isYourProgramEasyToUse", New("TextProposition", [Str("I don't know how to make my software easy to use")])),
+      Var("isUIDesignGood", New("TextProposition", [Str("I don't know how to design my software to be easy to use")])),
+      Var("isYourProblemEasy", New("TextProposition", [Str("I don't know how to implement a solution to my technical problem")])),
 
-      Var("canYouFindAnyLogs", New("TextProposition", [Str("Find logs")])),
-      Var("canYouFindAVersionThatWorks", New("TextProposition", [Str("Find a version that works")])),
-      Var("canYouAffordToWait", New("TextProposition", [Str("Afford to wait")])),
-      Var("doYouHaveAnySourceCode", New("TextProposition", [Str("Have any code")])),
-      Var("doYouHaveAnInstantMessenger", New("TextProposition", [Str("Have an instant messenger")])),
-      Var("doYouHaveInternet", New("TextProposition", [Str("Have internet access")])),
-      
+
       #fixes
-      Var("askForHelp", New("TextAction", [Str("Ask a helpful person for help.")])),
-      Var("justSolveIt", New("TextAction", [Str("Use your knowledge of the problem to solve it.")])),
+      Var("askForHelp", New("TextAction", [Str("Ask someone for help.")])),
+      Var("justSolveIt", New("TextAction", [Str("Solve the problem on your own.")])),
       Var("readTheLogs", New("TextAction", [Str("Read the logs.")])),
       Var("haveMeAnalyzeTheLogs", New("TextAction", [Str("Have me analyze the logs (this isn't implemented yet).")])),
-      Var("diffThem", New("TextAction", [Str("Look for differences using the bash command `diff -r directory1 directory2`.")])),
+      Var("diffThem", New("TextAction", [Str("Look for differences between a working version and a nonworking version using the bash command `diff -r sourceDirectory1 sourceDirectory2`.")])),
       Var("waitUntilYouFeelRefreshed", New("TextAction", [Str("Take a break and return with a possibly fresh perspective.")])),
       Var("waitUntilItHappensAgain", New("TextAction", [Str("Wait for the problem to happen again, at which point you might be more able to notice a pattern.")])),
       Var("rerunTheImprovedProgram", New("TextAction", [Str("Improve the program and run the program again.")])),
       Var("improveTheSourceCode", New("TextAction", [Str("Improve the source code.")])),
       Var("readTheSourceCode", New("TextAction", [Str("Read the source code.")])),
-      Var("readTheInstantMessengerNames", New("TextAction", [Str("Look at the names in the instant messenger.")])),
-      Var("openGoogle", New("TextAction", [Str("Open google.com in a web browser.")])),
+      Var("readTheInstantMessengerNames", New("TextAction", [Str("Find a person by reading the names in the instant messenger.")])),
+      #Var("openGoogle", New("TextAction", [Str("Open google.com in a web browser.")])),
+      Var("openGoogle", New("SearchGoogle_Action")),
       Var("openCompanyWiki", New("TextAction", [Str("Open the company wiki in a web browser.")])),
       Var("runGitLog", New("TextAction", [Str("Run `git log <filename>`.")])),
+      Var("unzipTheProgram", New("TextAction", [Str("Run `unzip <programPath>`.")])),
+      Var("decompileTheProgram", New("TextAction", [Str("Run a decompiler against the program.")])),
+      Var("makeAMockup", New("TextAction", [Str("Make a mockup.")])),
+      Var("testInternet", New("TestInternet_Action")),
 
       #You can make x work if you can find a knowledgeable entity and ask the knowledgeable entity for help
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("xWorks"), Get("didYouFindHelp"), Get("askForHelp")])]),
@@ -2254,8 +2337,12 @@ def suggestion():
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouUnderstandTheProblem"), Get("didYouFindHelpfulLogs"), Get("readTheLogs")])]),
       #You can understand the problem if I analyze some logs
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouUnderstandTheProblem"), Get("canYouFindAnyLogs"), Get("haveMeAnalyzeTheLogs")])]),
-      #You can understand the problem if you diff with a version that works
-      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouUnderstandTheProblem"), Get("canYouFindAVersionThatWorks"), Get("diffThem")])]),
+
+      #You can understand the problem if you get code that works and code that fails and diff them
+      Var("diffThemSolution", New("Solution", [Get("doYouUnderstandTheProblem"), Get("canYouFindAVersionThatWorks"), Get("diffThem")])),
+      DotCall(Get("diffThemSolution"), "addPrerequisite", [Get("doYouHaveAnySourceCode")]),
+      DotCall(Get("solver"), "addSolution", [Get("diffThemSolution")]),
+      
       #You can understand the problem if you wait until you feel better
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouUnderstandTheProblem"), Get("canYouAffordToWait"), Get("waitUntilYouFeelRefreshed")])]), #I can also include some jokes for making the user feel refreshed
       
@@ -2280,9 +2367,35 @@ def suggestion():
       #You can find a knowledgeable entity if you have source code and run 'git log'
       DotCall(Get("solver"), "addSolution", [New("Solution", [Get("didYouFindHelp"), Get("doYouHaveAnySourceCode"), Get("runGitLog")])]),
 
-      Return(Get("solver")),
+      #You can find a version that works if you ask a knowledgeable entity
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("canYouFindAVersionThatWorks"), Get("didYouFindHelp"), Get("askForHelp")])]),
 
-      Var("solutionA", New("Solution", [Get("didYouFindHelp"), Get("doYouHaveAnySourceCode"), Get("runGitLog")])),
+      #You may be able to find source code if you unzip the program
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouHaveAnySourceCode"), Const(None), Get("unzipTheProgram")])]),
+      #You may be able to find source code if you decompile the program
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouHaveAnySourceCode"), Const(None), Get("decompileTheProgram")])]),
+
+      #You can make your code good if you have a UI design and an easy technical problem
+      Var("easyToUseSolution", New("Solution", [Get("isYourProgramEasyToUse"), Get("isUIDesignGood"), Get("justSolveIt")])),
+      DotCall(Get("easyToUseSolution"), "addPrerequisite", [Get("isYourProblemEasy")]),
+      DotCall(Get("solver"), "addSolution", [Get("easyToUseSolution")]),
+
+      #You can get a good UI design if you make a mockup
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("isUIDesignGood"), Get("canYouAffordToWait"), Get("makeAMockup")])]),
+
+      #You can figure out your difficult problem if you think about it
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("isYourProblemEasy"), Get("canYouAffordToWait"), Get("justSolveIt")])]),
+      #You can figure out your difficult problem if you ask for help
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("isYourProblemEasy"), Get("didYouFindHelp"), Get("askForHelp")])]),
+
+      #If you think you don't have internet, I can check it for you
+      DotCall(Get("solver"), "addSolution", [New("Solution", [Get("doYouHaveInternet"), Const(None), Get("testInternet")])]),
+
+
+      #DotCall(Get("solver"), "addSolution", [New("Solution", [Get(""), Get(""), Get("")])]),
+
+
+      Return(Get("solver")),      
     ]),
 
 
@@ -2473,7 +2586,7 @@ def suggestion():
       .inherit("MultipleChoiceQuestion")
       .init([], [
         SuperCall("__init__"),
-        SelfSet("header", Str("These are the problems I can solve!\n")),
+        SelfSet("header", Str("These are the problems I may be able to solve!\n")),
       ])
       .func(Sig("choseChoice", ["choiceText"]), [
         DotCall(SelfGet("communicator"), "solveProblem", [Get("choiceText")]),
@@ -2526,11 +2639,15 @@ def suggestion():
         SelfSet("universe", New("Universe")),
         SelfSet("question", New("CompositeQuestion")),
         SelfCall("setUsername", [Str("jeff")]),
+        Print(Str("Hi, I am WhyBot. You can ask me 'why'.")),
+        Print(Str("These are my skills:")),
+        Print(Str("")),
+        Print(Str("1. I can help debug software.")),
       ])
       .func(Sig("showGenericHelp", []), [
         Print(Str("""
-        help   <keyword> - Ask me for usage of keyword <keyword> .
         solve            - Ask me to ask you what you would like solved.
+        help   <keyword> - Ask me for usage of keyword <keyword> .
         y      <id>      - Ask me how I deduced statement number <id> .
         clear            - Ask me to output lots of blank lines
         nvm              - Ask me to cancel the question that I'm asking
@@ -2543,7 +2660,7 @@ def suggestion():
          Print(Str("- (#<whyId>): <text>")),
          Print(Str("\nType 'y <whyId>' to list statements that support statement number <whyId>")),
          Print(Str("")),
-         Print(Str("The result wil be some output that looks like this:\n")),
+         Print(Str("The result will be some output that looks like this:\n")),
          ShortExplain(Str("Tadaa!"), Const(1)),
          Print(Str("")),
          Print(Str("The format of each of these lines is:\n")),
@@ -2600,11 +2717,18 @@ def suggestion():
         DotCall(SelfGet("question"), "clear"),
       ])
       .func(Sig("respondToSolve", []), [
+        #Var("question", New("SolveProblem_Query")),
+        #DotSet(Get("question"), "communicator", Get("self")),
+        #ForEach("problemText", DotGet(SelfGet("solver"), "solutions"), [
+        #  DotCall(Get("question"), "addChoice", [Get("problemText")]),
+        #]),
+        #SelfCall("setQuestion", [Get("question")]),
+        SelfCall("askChooseProblem", [DotGet(SelfGet("solver"), "solutions")]),
+      ])
+      .func(Sig("askChooseProblem", ["problemDescriptions"]), [
         Var("question", New("SolveProblem_Query")),
         DotSet(Get("question"), "communicator", Get("self")),
-        ForEach("problemText", DotGet(SelfGet("solver"), "solutions"), [
-          DotCall(Get("question"), "addChoice", [Get("problemText")]),
-        ]),
+        DotCall(Get("question"), "addChoices", [Get("problemDescriptions")]),
         SelfCall("setQuestion", [Get("question")]),
       ])
       .func(Sig("solveProblem", ["queryText"]), [
@@ -2640,10 +2764,15 @@ def suggestion():
         If(DotCall(Str("Activate"), "equals", [Get("acceptOrReject")])).then([
           DotCall(Get("solution"), "execute"),
         ]).otherwise([
-          Var("rejected", DotCall(DotGet(Get("solution"), "prerequisite"), "toString")),
+          #Var("rejected", DotCall(DotGet(Get("solution"), "prerequisite"), "toString")),
           #Print(Concat([Str("Marking as infeasible '"), Get("rejected"), Str("'")])),
           #SelfCall("enterTextFact", [Get("rejected"), Str("False")]),
-          SelfCall("solveProblem", [Get("rejected")]),
+          #SelfCall("solveProblem", [Get("rejected")]),
+          Var("problemDescriptions", New("List")),
+          ForEach("prerequisite", DotGet(Get("solution"), "prerequisites"), [
+            DotCall(Get("problemDescriptions"), "append", [DotCall(Get("prerequisite"), "toString")]),
+          ]),
+          SelfCall("askChooseProblem", [Get("problemDescriptions")]),
         ])
       ])
       .func(Sig("respondToHelp", ["text"]), [
@@ -2654,7 +2783,7 @@ def suggestion():
           If(DotCall(Str("solve"), "equals", [Get("keyword")])).then([
             SelfCall("showSolveHelp")
           ]).otherwise([
-            If(DotCall(Str("y"), "equals", [Get("keyword")])).then([
+            If(Or(DotCall(Str("y"), "equals", [Get("keyword")]), DotCall(Str("why"), "equals", [Get("keyword")]))).then([
               SelfCall("showJustificationHelp")
             ]).otherwise([
               If(DotCall(Str("clear"), "equals", [Get("keyword")])).then([
@@ -2707,7 +2836,7 @@ def suggestion():
         Var("argumentText", DotCall(Get("responseText"), "exceptPrefix", [Get("component0")])),
         Set("argumentText", DotCall(Get("argumentText"), "exceptPrefix", [Str(" ")])),
 
-        If(DotCall(Str("y"), "equals", [Get("component0")])).then([
+        If(Or(DotCall(Str("y"), "equals", [Get("component0")]), DotCall(Str("why"), "equals", [Get("component0")]))).then([
           SelfCall("respondToWhy", [Get("argumentText")])
         ]).otherwise([
          If(DotCall(Str("solve"), "equals", [Get("component0")])).then([
