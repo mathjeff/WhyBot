@@ -98,7 +98,7 @@ class ShellScript(object):
 def simpleDebug():
   logger.message()
   logger.message()
-  message = "Rudimentary debugger called due to an error"
+  message = "Rudimentary WhyBot debugger called due to an error"
   boundary = "*" * len(message)
   logger.message(boundary)
   logger.message(message)
@@ -690,7 +690,7 @@ class Var(Set):
       self.execution.getScope().declareInfo(self.propertyName, JustifiedValue(None, TextJustification("the default variable value is None")))
       super(Var, self).process(callJustification)
     except Exception as e:
-      logger.fail(traceback.format_exc(e), FullJustification("error", e, self.lineNumber, callJustification, []))
+      logger.fail(str(e), FullJustification("error", e, self.lineNumber, callJustification, []))
 
 class Return(Var):
   def __init__(self, valueProvider):
