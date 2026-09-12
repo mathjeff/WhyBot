@@ -432,7 +432,7 @@ class Execution(object):
       if callJustification is not None:
         justification = callJustification
       else:
-        justification = TextJustification(str(statement) + " is in my program")
+        justification = TextJustification(str(statement) + " is in my program at line " + str(statement.lineNumber))
       self.callStack[-1] = statement.lineNumber
       result = statement.process(justification)
       if result is not None:
