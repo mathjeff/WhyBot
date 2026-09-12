@@ -107,7 +107,7 @@ def simpleDebug():
   logger.message()
   logger.message("Type a number to view an explanation of the statement with that id")
   while True:
-    text = raw_input("id:")
+    text = input("id:")
     num = int(text)
     justification = justificationsById[num]
     logger.message(justification.explainRecursive(1))
@@ -1100,7 +1100,7 @@ class Ask(ValueProvider):
     else:
       prompt = ''
     try:
-      enteredText = raw_input(prompt)
+      enteredText = input(prompt)
     except EOFError as e:
       sys.exit(0)
     message = "You entered '" + str(enteredText) + "'"
@@ -2004,7 +2004,7 @@ class DictionaryWrapper(NativeObject):
   def getItems(self):
     #returns List<TKey, JustifiedValue<TValue, Justification>>
     result = []
-    for (key, info) in self.keyInfos.iteritems():
+    for (key, info) in self.keyInfos.items():
       result.append(info)
     return result
 
